@@ -1,8 +1,7 @@
 import polars as pl
 import polars_quant as plqt
-from timeit import timeit
 
-data = {
+df = {
     'date': [
         '2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04', '2023-01-05',
         '2023-01-08', '2023-01-09', '2023-01-10', '2023-01-11', '2023-01-12',
@@ -41,11 +40,9 @@ data = {
     ]
 }
 
-def pl_test():
-    df_pl = pl.DataFrame(data)[["date", "close"]]
-    entries_pl = df_pl.with_columns((pl.col("close") > pl.col("close").shift(1)))
-    exits_pl = df_pl.with_columns((pl.col("close") < pl.col("close").shift(1)))
-    bt_pl = plqt.Backtrade.run(df_pl, entries_pl, exits_pl)
-    return bt_pl
+df = pl.DataFrame(df)[["date", "close"]]
+entries_pl = df.with_columns((pl.col("close") > pl.col("close").shift(1)))
+exits_pl = df.with_columns((pl.col("close") < pl.col("close").shift(1)))
+bt = plqt.Backtrade.run(df, entries_pl, exits_pl).summary()
 
-print(timeit(pl_test, number=1000))
+
