@@ -2,6 +2,8 @@ import polars as pl
 import polars_quant as plqt
 
 df = {
+    'symbol':["sz000001"] * 20,
+
     'date': [
         '2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04', '2023-01-05',
         '2023-01-08', '2023-01-09', '2023-01-10', '2023-01-11', '2023-01-12',
@@ -40,9 +42,8 @@ df = {
     ]
 }
 
-df = pl.DataFrame(df)[["date", "close"]]
+df = pl.DataFrame(df)[["symbol", "date", "open", "close"]]
 entries_pl = df.with_columns((pl.col("close") > pl.col("close").shift(1)))
 exits_pl = df.with_columns((pl.col("close") < pl.col("close").shift(1)))
-bt = plqt.Backtrade.run(df, entries_pl, exits_pl).summary()
-
+rsi = plqt.RSI().run(df ).frame
 

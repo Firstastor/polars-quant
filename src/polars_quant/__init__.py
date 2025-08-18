@@ -1,2 +1,2 @@
 from .backtrade import *
-from .signal import *
+from .talib import *
