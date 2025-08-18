@@ -5,8 +5,8 @@ class Backtrade():
                  results: pl.DataFrame |None = None,
                  trades: pl.DataFrame |None = None
                  ):
-        self._results = results
-        self._trades = trades
+        self.results = results
+        self.trades = trades
         
     def _cal_summary(self):
         if self._results is None or self._trades is None:
@@ -149,10 +149,6 @@ class Backtrade():
 
     def plot(self):
         pass
-
-    def results(self):
-        print(self._results)
-        return self
     
     def summary(self):
         if not hasattr(self, "_summary"):
@@ -181,9 +177,6 @@ class Backtrade():
         
         return self
 
-    def trades(self):
-        print(self._trades)
-        return self
     
 
 

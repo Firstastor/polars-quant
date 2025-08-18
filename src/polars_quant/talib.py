@@ -28,6 +28,35 @@ class BBANDS:
         
         return cls()    
        
+class CCI:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def run(
+        cls,
+        data: pl.DataFrame,
+        timeperiod: int = 20
+        ):
+        results = {}
+        cls.data_dict = {col: data[[col]] for col in data.columns if data[col].dtype.is_numeric()}
+        cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
+        cls.timeperiod = timeperiod
+        high_col = next((col for col in data.columns if col.lower() == 'high' or col.lower() == 'h'), None)
+        low_col = next((col for col in data.columns if col.lower() == 'low' or col.lower() == 'l'), None)
+        close_col = next((col for col in data.columns if col.lower() == 'close' or col.lower() == 'c'), None)
+        
+        if not all([high_col, low_col, close_col]):
+            raise ValueError("Could not find required columns (High, Low, Close) in the data")
+        typ = pl.Series((data[high_col] + data[low_col] + data[close_col]) / 3)
+        sma = typ.rolling_mean(timeperiod)
+        mean_dev = (typ - sma).abs().rolling_mean(timeperiod)
+        cci = (typ - sma) / (0.015 * mean_dev)
+        results["CCI"] = cls.data_object.with_columns(cci.alias("CCI"))
+        cls.frame = results
+        
+        return cls()
+    
 class EMA:
     def __init__(self) -> None:
         pass
@@ -37,7 +66,7 @@ class EMA:
             first_ma: int,
             second_ma: int
             ):
-        results ={}
+        results: dict[str, pl.DataFrame] ={}
         for col in self.data_dict:
             if first_ma in self.timeperiod and second_ma in self.timeperiod:
                 data_first: pl.Series =  self.frame[col][f"{col}_ema{first_ma}"]
@@ -73,6 +102,50 @@ class EMA:
         cls.frame = results
         return cls()
     
+class KAMA:
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def run(
+        cls,
+        data: pl.DataFrame,
+        timeperiod: int = 14,
+        fast_period: int = 2,
+        slow_period: int = 30
+        ):
+        results = {}
+        cls.data_dict = {col: data[[col]] for col in data.columns if data[col].dtype.is_numeric()}
+        cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
+        cls.timeperiod = timeperiod
+        cls.fast_period = fast_period
+        cls.slow_period = slow_period
+
+        for data_col, data_price in cls.data_dict.items():
+            change = pl.col(data_col).diff(timeperiod).abs()
+            volatility = pl.col(data_col).diff(1).abs().rolling_sum(timeperiod)
+            
+            er = (change / volatility).alias("er")
+            
+            fast_sc = 2 / (fast_period + 1)
+            slow_sc = 2 / (slow_period + 1)
+            sc = (er * (fast_sc - slow_sc) + slow_sc).pow(2).alias("sc")
+            
+            kama = data_price.with_columns(
+                change=change,
+                volatility=volatility,
+                er=er,
+                sc=sc
+            ).with_columns(
+                (pl.col(data_col).shift(1) + pl.col("sc") * (pl.col(data_col) - pl.col(data_col).shift(1))).alias(f"{data_col}_kama")
+            )[f"{data_col}_kama"]
+            
+            results[data_col] = cls.data_object.with_columns(kama)
+            
+        cls.frame = results
+        
+        return cls()
+
 class MA:
     def __init__(self) -> None:
         pass
@@ -82,7 +155,7 @@ class MA:
             first_ma: int,
             second_ma: int
             ):
-        results ={}
+        results: dict[str, pl.DataFrame] ={}
         for col in self.data_dict:
             if first_ma in self.timeperiod and second_ma in self.timeperiod:
                 data_first: pl.Series =  self.frame[col][f"{col}_ma{first_ma}"]
@@ -169,9 +242,8 @@ class RSI:
                 avg_gain=pl.col("gain").ewm_mean(span=timeperiod),
                 avg_loss=pl.col("loss").ewm_mean(span=timeperiod),
             ).with_columns(
-                rs=pl.col("avg_gain") / pl.col("avg_loss"),
-                rsi=100 - (100 / (1 + pl.col("avg_gain") / pl.col("avg_loss"))),
-            )
+                (100 - (100 / (1 + pl.col("avg_gain") / pl.col("avg_loss")))).alias(f"{data_col}_rsi"),
+            )[f"{data_col}_rsi"]
             results[data_col] = cls.data_object.with_columns(rsi)
         cls.frame = results
         
@@ -186,7 +258,7 @@ class SMA:
             first_ma: int,
             second_ma: int
             ):
-        results ={}
+        results: dict[str, pl.DataFrame] ={}
         for col in self.data_dict:
             if first_ma in self.timeperiod and second_ma in self.timeperiod:
                 data_first: pl.Series =  self.frame[col][f"{col}_sma{first_ma}"]
@@ -221,7 +293,72 @@ class SMA:
         cls.frame = results
         
         return cls()
-    
+
+class TEMA:
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def run(
+        cls,
+        data: pl.DataFrame,
+        timeperiod: int = 14
+        ):
+        results = {}
+        cls.data_dict = {col: data[[col]] for col in data.columns if data[col].dtype.is_numeric()}
+        cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
+        cls.timeperiod = timeperiod
+
+        for data_col, data_price in cls.data_dict.items():
+            ema1 = data_price.with_columns(
+                ema1=pl.col(data_col).ewm_mean(span=timeperiod)
+            )["ema1"]
+            
+            ema2 = ema1.to_frame().with_columns(
+                ema2=pl.col("ema1").ewm_mean(span=timeperiod)
+            )["ema2"]
+            
+            ema3 = ema2.to_frame().with_columns(
+                ema3=pl.col("ema2").ewm_mean(span=timeperiod)
+            )["ema3"]
+            
+            tema = (3 * ema1 - 3 * ema2 + ema3).alias(f"{data_col}_tema")
+            results[data_col] = cls.data_object.with_columns(tema)
+            
+        cls.frame = results
+        
+        return cls()  
+
+class TRIMA:
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def run(
+        cls,
+        data: pl.DataFrame,
+        timeperiod: int = 14
+        ):
+        results = {}
+        cls.data_dict = {col: data[[col]] for col in data.columns if data[col].dtype.is_numeric()}
+        cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
+        cls.timeperiod = timeperiod
+
+        for data_col, data_price in cls.data_dict.items():
+            window_size = (timeperiod + 1) // 2
+            sma1 = data_price.with_columns(
+                sma1=pl.col(data_col).rolling_mean(window_size=window_size)
+            )["sma1"]
+            trima = sma1.to_frame().with_columns(
+                trima=pl.col("sma1").rolling_mean(window_size=window_size)
+            )[f"{data_col}_trima"]
+            
+            results[data_col] = cls.data_object.with_columns(trima)
+            
+        cls.frame = results
+        
+        return cls()
+
 class WMA:
     def __init__(self) -> None:
         pass
@@ -231,7 +368,7 @@ class WMA:
             first_ma: int,
             second_ma: int
             ):
-        results ={}
+        results: dict[str, pl.DataFrame] ={}
         for col in self.data_dict:
             if first_ma in self.timeperiod and second_ma in self.timeperiod:
                 data_first: pl.Series =  self.frame[col][f"{col}_wma{first_ma}"]
