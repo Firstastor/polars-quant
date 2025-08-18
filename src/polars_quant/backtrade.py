@@ -9,11 +9,11 @@ class Backtrade():
         self.trades = trades
         
     def _cal_summary(self):
-        if self._results is None or self._trades is None:
+        if self.results is None or self.trades is None:
             raise ValueError("No results or trades data available")
 
         summary = {}
-        equity = self._results["Equity"]
+        equity = self.results["Equity"]
         returns: pl.Series = equity.diff() / equity.shift(1)
         
         summary["initial_capital"] = equity[0]
@@ -21,8 +21,8 @@ class Backtrade():
         summary["total_return"] = (equity[-1] - equity[0]) / equity[0]
         summary["annualized_return"] = None
         
-        if len(self._trades) > 0:
-            trades = self._trades.filter(
+        if len(self.trades) > 0:
+            trades = self.trades.filter(
                 pl.col("sell_date").is_not_null() & pl.col("buy_date").is_not_null()
             )
             
@@ -44,7 +44,7 @@ class Backtrade():
                 summary["avg_trade_return"] = trades["return"].mean()
                 summary["max_drawdown"] = (1 - (equity / equity.cum_max())).max()
                 
-        dates = self._results["Date"].cast(pl.Date)
+        dates = self.results["Date"].str.to_datetime()
         if len(dates) > 1:
             days = (dates[-1] - dates[0]).days
             years = days / 365.25
@@ -177,7 +177,7 @@ class Backtrade():
         
         return self
 
-    
+
 
 
 
