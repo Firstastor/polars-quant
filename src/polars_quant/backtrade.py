@@ -39,14 +39,14 @@ class Backtrade():
                 
                 avg_profit = trades.filter(pl.col("profit") > 0)["profit"].mean()
                 avg_loss = trades.filter(pl.col("profit") < 0)["profit"].mean()
-                summary["profit_factor"] = abs(avg_profit / avg_loss) if (avg_loss != 0) & (avg_loss !=None) else float("inf")
+                summary["profit_factor"] = abs(avg_profit / avg_loss) if (avg_loss != 0) & (avg_loss is not None) else float("inf")
                 
                 summary["avg_trade_return"] = trades["return"].mean()
                 summary["max_drawdown"] = (1 - (equity / equity.cum_max())).max()
                 
         dates = self.results["Date"].str.to_datetime()
         if len(dates) > 1:
-            days = (dates[-1] - dates[0]).days
+            days = (dates.gather(-1) - dates.gather(0)).dt.total_days().item()
             years = days / 365.25
             
             if years > 0:
@@ -108,32 +108,45 @@ class Backtrade():
             init_cash: float = 100000.0,
             fee: float = 0.0,
             slip: float = 0.0,
-            size: float = 1.0
+            size: float = 1.0,
+            stop_loss: float = None,
+            take_profit: float = None
             ):
         h = data.height
         w = data.width
-        data = data.fill_null(0.0)
         date = data[:, 0]
         results: list[dict] = []
         trades: list[dict] = []
         trades_index = 0
         for width in range(1,w):
             symbol = data.columns[width]
-            price = data[:, width]
-            entry = entries[:, width].fill_null(False)
-            exit = exits[:, width].fill_null(False)
+            price = data[:, width].fill_null(0).to_list()
+            entry = entries[:, width].fill_null(False).to_list()
+            exit = exits[:, width].fill_null(False).to_list()
             cash = init_cash
             position: int = 0
 
             for height in range(h):
                 today = date[height]
                 today_price = price[height]
-                if entry[height] & (position==0):
-                    cash, position, trade = cls._buy_order(symbol, today, today_price, cash, fee, slip, size)
+                if entry[height] & ~position:
+                    cash, position, trade = cls._buy_order(symbol, 
+                                                           today, 
+                                                           today_price, 
+                                                           cash, 
+                                                           fee, 
+                                                           slip, 
+                                                           size)
                     trades.append(trade)
                     trades_index = len(trades) - 1
-                elif exit[height] & (position>0):
-                    cash, trade = cls._sell_order(symbol, today, position, today_price, cash, fee, slip)
+                elif exit[height] & position:
+                    cash, trade = cls._sell_order(symbol, 
+                                                  today, 
+                                                  position, 
+                                                  today_price, 
+                                                  cash, 
+                                                  fee, 
+                                                  slip)
                     position = 0
                     trades[trades_index].update(trade)
                 
@@ -146,9 +159,6 @@ class Backtrade():
                 results.append(result)
 
         return cls(pl.DataFrame(results), pl.DataFrame(trades))
-
-    def plot(self):
-        pass
     
     def summary(self):
         if not hasattr(self, "_summary"):
@@ -176,7 +186,6 @@ class Backtrade():
         print("="*40)
         
         return self
-
 
 
 

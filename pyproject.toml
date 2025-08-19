@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "polars>=1.32.3",
-    "ta-lib>=0.6.5",
 ]
 
 [build-system]
