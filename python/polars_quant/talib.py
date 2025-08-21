@@ -21,11 +21,11 @@ class ATR:
         if not all([high_col, low_col, close_col]):
             raise ValueError("Could not find required columns (High, Low, Close) in the data")
 
-        tr1 = data[high_col] - data[low_col]
-        tr2 = (data[high_col] - data[close_col].shift(1)).abs()
-        tr3 = (data[low_col] - data[close_col].shift(1)).abs()
-        tr = pl.max_horizontal(tr1, tr2, tr3)
-
+        tr = pl.max_horizontal(
+            data[high_col] - data[low_col],
+            (data[high_col] - data[close_col].shift(1)).abs(),
+            (data[low_col] - data[close_col].shift(1)).abs()
+        )
         atr = tr.rolling_mean(timeperiod)
 
         results["ATR"] = cls.data_object.with_columns(atr.alias("ATR"))
@@ -48,12 +48,14 @@ class BBANDS:
         results = {}
         cls.data_dict = {col: data[col] for col in data.columns if data[col].dtype.is_numeric()}
         cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
+        
         cls.timeperiod = timeperiod
         if len(data) > timeperiod:
             for data_col, data_price in cls.data_dict.items():
                 middle = data_price.rolling_mean(timeperiod).alias(f"{data_col}_middle")
-                upper = (middle + nbdevup * middle.std()).alias(f"{data_col}_upper")
-                lower = (middle - nbdevdn * middle.std()).alias(f"{data_col}_lower")
+                std = data_price.rolling_std(timeperiod)
+                upper = (middle + nbdevup * std).alias(f"{data_col}_upper")
+                lower = (middle - nbdevdn * std).alias(f"{data_col}_lower")
                 results[data_col] = cls.data_object.with_columns(middle,upper,lower)
         else:
             raise ValueError("the length of data is less than or equal timeperiod")
@@ -72,7 +74,7 @@ class CCI:
         timeperiod: int = 20
         ):
         results = {}
-        cls.data_dict = {col: data[[col]] for col in data.columns if data[col].dtype.is_numeric()}
+        cls.data_dict = {col: data[col] for col in data.columns if data[col].dtype.is_numeric()}
         cls.data_object = data.select(col for col in data.columns if not data[col].dtype.is_numeric())
         cls.timeperiod = timeperiod
         high_col = next((col for col in data.columns if col.lower() == 'high' or col.lower() == 'h'), None)
@@ -81,7 +83,7 @@ class CCI:
         
         if not all([high_col, low_col, close_col]):
             raise ValueError("Could not find required columns (High, Low, Close) in the data")
-        typ = pl.Series((data[high_col] + data[low_col] + data[close_col]) / 3)
+        typ = ((data[high_col] + data[low_col] + data[close_col]) / 3).to_series()
         sma = typ.rolling_mean(timeperiod)
         mean_dev = (typ - sma).abs().rolling_mean(timeperiod)
         cci = (typ - sma) / (0.015 * mean_dev)
@@ -188,13 +190,13 @@ class MA:
             first_ma: int,
             second_ma: int
             ):
-        results: dict[str, pl.DataFrame] ={}
-        for col in self.data_dict:
+        results = self.data_object
+        for idx, col in enumerate(self.data_dict):
             if first_ma in self.timeperiod and second_ma in self.timeperiod:
                 data_first: pl.Series =  self.frame[col][f"{col}_ma{first_ma}"]
                 data_second: pl.Series =  self.frame[col][f"{col}_ma{second_ma}"]
-                results[col] = self.data_object.with_columns(((data_first > data_second) & (data_second.shift(1) > data_first.shift(1)))
-                                                             .alias(f"{col}_ma{first_ma}_cross_ma{second_ma}"))
+                results = results.with_columns(((data_first > data_second) & (data_second.shift(1) > data_first.shift(1)))
+                                                             .alias(f"{idx}"))
             else:
                 raise ValueError("Missing required timeperiod")
         return results
