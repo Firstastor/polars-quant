@@ -1,22 +1,18 @@
 # polars_quant
 
-Choose your language / 选择语言：
-
-🌐 Languages: [English](README.md) | [简体中文](README.zh-CN.md)
-
-polars_quant is a Rust-backed Python extension exposing a small set of real APIs implemented in this repository:
+polars_quant 是一个由 Rust 支持的 Python 原生扩展，本仓库已实现并导出的主要接口为：
 
 - polars_quant.history(stock_code: str, scale: int = 240, datalen: int = 3650, timeout: int = 10)
-  - Fetch historical OHLCV from the remote source. Returns a list of records (each having keys: day, open, close, high, low, volume) or None.
+  - 从远端获取 OHLCV 历史数据。返回记录列表（每条记录包含 day, open, close, high, low, volume）或 None。
 
-- class polars_quant.Backtrade
+- 类 polars_quant.Backtrade
   - Backtrade.run(data, entries, exits, init_cash=100000.0, fee=0.0, slip=0.0, size=1.0)
   - Backtrade.portfolio(data, entries, exits, init_cash=100000.0, fee=0.0, slip=0.0, size=1.0)
-  - Instance attributes/methods: results, trades, summary(), speed
+  - 实例提供的属性/方法：results、trades、summary()、speed
 
-Quick usage examples
+快速使用示例
 
-1) Fetch history
+1) 抓取历史数据
 
 ```python
 import polars as pl
@@ -24,13 +20,13 @@ import polars_quant
 
 items = polars_quant.history("sh600519", scale=240, datalen=365, timeout=10)
 if items is None:
-    print("No data")
+    print("没有数据")
 else:
     df = pl.DataFrame(items)
     print(df.head())
 ```
 
-2) Backtest (single symbol)
+2) 单标的回测示例
 
 ```python
 import polars as pl
@@ -49,7 +45,7 @@ if getattr(bt, "results", None) is not None:
     print(bt.results.head())
 ```
 
-Notes
-- Keep `data`, `entries`, `exits` aligned: column 0 = date, columns 1..N = symbols (one column per symbol).
-- `entries`/`exits` columns accept booleans or integers as flags.
-- GitHub repository README is static; no automatic locale switching. Use this pattern to maintain parallel language files.
+注意
+- 保持 data、entries、exits 三者列对齐：第 0 列为日期，后续列为每个标的（每列一个标的）。
+- entries / exits 列可以使用布尔或整数标记。
+- GitHub 不会自动根据浏览器语言切换 README；使用并维护两个语言文件是一种简单可维护的做法。
