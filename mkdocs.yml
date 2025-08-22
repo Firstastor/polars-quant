@@ -28,8 +28,6 @@ nav:
 
 plugins:
   - search
-  - minify:
-      minify_html: true
 
 theme:
   name: material
