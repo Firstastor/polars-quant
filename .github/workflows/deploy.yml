@@ -3,12 +3,12 @@ name: Deploy MkDocs site to GitHub Pages
 on:
   push:
     branches:
-      - main   # 只有推送到 main 才触发
+      - main 
 
 permissions:
-  contents: read        # 只读源码就够了
-  pages: write          # 允许写 Pages
-  id-token: write       # 允许 OIDC 认证（部署必需）
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -28,12 +28,12 @@ jobs:
           pip install mkdocs-material
 
       - name: Build MkDocs
-        run: mkdocs build --site-dir ./_site   # 注意：必须输出到 ./_site
+        run: mkdocs build --site-dir ./_site 
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./_site    # 上传 _site 文件夹，供 Pages 发布
+          path: ./_site 
 
   deploy:
     needs: build

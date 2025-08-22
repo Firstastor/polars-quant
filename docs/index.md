@@ -1,17 +1,14 @@
-# Welcome to MkDocs
+# Welcome to Polars-Quant
 
-For full documentation visit [mkdocs.org](https://www.mkdocs.org).
+Welcome to the Polars-Quant project! This library provides powerful tools for backtesting trading strategies using the **Polars** DataFrame library. It supports both per-symbol independent backtests and portfolio-level backtests, making it a flexible solution for algorithmic trading.
 
-## Commands
+## Features
+- **Backtesting**: Run vectorized backtests with Polars DataFrames.
+- **Per-symbol Independent Backtests**: Run tests on individual symbols using the `Backtrade.run` method.
+- **Portfolio-level Backtests**: Perform backtests with shared capital across multiple symbols using the `Backtrade.portfolio` method.
+- **Performance Analytics**: Analyze backtest results with detailed statistics.
 
-* `mkdocs new [dir-name]` - Create a new project.
-* `mkdocs serve` - Start the live-reloading docs server.
-* `mkdocs build` - Build the documentation site.
-* `mkdocs -h` - Print help message and exit.
+## Getting Started
+To begin using Polars-Quant, follow the [installation guide](start/installation.md) and check out the [usage examples](start/usage.md) for help on running your first backtest.
 
-## Project layout
-
-    mkdocs.yml    # The configuration file.
-    docs/
-        index.md  # The documentation homepage.
-        ...       # Other markdown pages, images and other files.
+For more details, visit the [GitHub Repository](https://github.com/Firstastor/polars-quant/).
