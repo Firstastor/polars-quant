@@ -1,5 +1,9 @@
 # polars_quant
 
+Choose your language / 选择语言：
+
+🌐 Languages: [English](README.md) | [简体中文](README.zh-CN.md)
+
 polars_quant 是一个由 Rust 支持的 Python 原生扩展，本仓库已实现并导出的主要接口为：
 
 - polars_quant.history(stock_code: str, scale: int = 240, datalen: int = 3650, timeout: int = 10)
