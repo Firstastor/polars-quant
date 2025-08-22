@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Firstastor", email = "23150126@hdu.edu.cn" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.9"
 dependencies = [
     "polars==1.32.0",
     "pyarrow>=21.0.0",
