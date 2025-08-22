@@ -1,9 +1,5 @@
 # polars_quant
 
-Choose your language / 选择语言：
-
-🌐 Languages: [English](README.md) | [简体中文](README.zh-CN.md)
-
 polars_quant is a Rust-backed Python extension exposing a small set of real APIs implemented in this repository:
 
 - polars_quant.history(stock_code: str, scale: int = 240, datalen: int = 3650, timeout: int = 10)
@@ -34,7 +30,7 @@ else:
 
 ```python
 import polars as pl
-from polars_quant import Backtrade
+import polars_quant as plqt
 
 data = pl.DataFrame({
     "date": ["2024-01-01","2024-01-02","2024-01-03"],
@@ -43,7 +39,7 @@ data = pl.DataFrame({
 entries = pl.DataFrame({"date": data["date"], "SYM": [False, True, False]})
 exits = pl.DataFrame({"date": data["date"], "SYM": [False, False, True]})
 
-bt = Backtrade.run(data, entries, exits, init_cash=100000.0, fee=0.0005)
+bt = plqt.Backtrade.run(data, entries, exits, init_cash=100000.0, fee=0.0005)
 print(bt.summary())
 if getattr(bt, "results", None) is not None:
     print(bt.results.head())
