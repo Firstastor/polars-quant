@@ -1,2 +1,2 @@
 from .polars_quant import *
-from .talib import *
+from .qtalib import *

@@ -100,4 +100,3 @@ fn parse_history(response_text: &str, stock_code: &str) -> Option<Vec<PyObject>>
         }
     }
 }
-

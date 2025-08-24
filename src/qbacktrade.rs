@@ -38,7 +38,6 @@ impl Backtrade {
         slip: f64,
         size: f64,
     ) -> PyResult<Self> {
-        use polars::prelude::*;
 
         let start = Instant::now();
 
@@ -262,7 +261,6 @@ impl Backtrade {
             speed,
         })
     }
-
 
     #[classmethod]
     #[pyo3(signature = (data, entries, exits, init_cash=100000.0, fee=0.0, slip=0.0, size=1.0))]
