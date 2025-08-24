@@ -9,6 +9,7 @@ name = "polars_quant"
 crate-type = ["cdylib"]
 
 [dependencies]
+futures = "0.3.31"
 polars = { version = "0.50.0", features = ["full"] }
 pyo3 = { version = "0.25.1", features = ["abi3-py39", "extension-module"] }
 pyo3-polars = "0.23"
