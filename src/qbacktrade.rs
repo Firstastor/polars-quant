@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 use pyo3_polars::PyDataFrame;
 use rayon::prelude::*;
-use std::time::Instant;
+
 
 #[pyclass]
 pub struct Backtrade {
@@ -39,7 +39,7 @@ impl Backtrade {
         size: f64,
     ) -> PyResult<Self> {
 
-        let start = Instant::now();
+        let start = std::time::Instant::now();
 
         let df_data = data.0;
         let df_entries = entries.0;
@@ -57,7 +57,6 @@ impl Backtrade {
             return Err(PyValueError::new_err("data has no rows"));
         }
 
-        // Extract dates once
         let dates_utf8 = df_data[0].str().ok();
         let dates: Vec<String> = (0..nrows)
             .map(|i| {
@@ -69,7 +68,6 @@ impl Backtrade {
             })
             .collect();
 
-        // Pre-extract prices, entries, exits as Vec
         let mut symbols = Vec::with_capacity(ncols - 1);
         let mut prices_all: Vec<Vec<f64>> = Vec::with_capacity(ncols - 1);
         let mut entries_all: Vec<Vec<bool>> = Vec::with_capacity(ncols - 1);
@@ -138,8 +136,6 @@ impl Backtrade {
             entries_all.push(entry_flags);
             exits_all.push(exit_flags);
         }
-
-        // Portfolio-level vars
         let mut cash = init_cash;
         let mut positions = vec![0i64; ncols - 1];
 
@@ -200,7 +196,6 @@ impl Backtrade {
                     positions[col_idx] = 0;
                 }
             }
-
             let mut equity = cash;
             for (col_idx, _) in symbols.iter().enumerate() {
                 let pos = positions[col_idx];
@@ -215,7 +210,6 @@ impl Backtrade {
             res_equity.push(equity);
         }
 
-        // Build results df
         let results_df = DataFrame::new(vec![
             Column::new("Date".into(), res_date),
             Column::new("Cash".into(), res_cash),
@@ -276,7 +270,7 @@ impl Backtrade {
     ) -> PyResult<Self> {
         use std::sync::Arc;
 
-        let start = Instant::now();
+        let start = std::time::Instant::now();
 
         let df_data = data.0;
         let df_entries = entries.0;
@@ -483,7 +477,6 @@ impl Backtrade {
         })
     }
 
-
     fn results(&self) -> PyResult<Option<PyDataFrame>> {
         Ok(self.results.clone().map(PyDataFrame))
     }
@@ -592,11 +585,9 @@ impl Backtrade {
         Ok(out)
     }
 
-
     fn trades(&self) -> PyResult<Option<PyDataFrame>> {
         Ok(self.trades.clone().map(PyDataFrame))
     }
-
 }
 
 impl Backtrade {
