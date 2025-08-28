@@ -7,6 +7,7 @@ mod qtalib;
 #[pymodule]
 fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<qbacktrade::Backtrade>()?;
+    m.add_class::<qbacktrade::Portfolio>()?;
     m.add_function(wrap_pyfunction!(qstock::info, m)?)?;
     m.add_function(wrap_pyfunction!(qstock::info_save, m)?)?;
     m.add_function(wrap_pyfunction!(qstock::history, m)?)?;
