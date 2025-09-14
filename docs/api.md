@@ -1,259 +1,293 @@
-# **API Documentation**
+# API (short reference) 🧾
 
-The **Polars-Quant** API provides methods for backtesting trading strategies using Polars DataFrames. Below is an overview of the classes and methods available, including the integration of TA-Lib indicators.
+This page lists the most-used functions and their short signatures. For exact types and overloads see `python/polars_quant/polars_quant.pyi`.
 
-## `Backtrade` Class
+Top-level items
 
-The `Backtrade` class allows you to run backtests using historical price data and entry/exit signals.
+- Backtest helpers
+  - `Backtrade.run(data, entries, exits, init_cash=100000.0, fee=0.0, slip=0.0, size=1.0)` → Backtrade
+  - `Backtrade.portfolio(...)` → Backtrade
+  - `Portfolio.run(...)` → Portfolio
 
-### Attributes:
-- **`results`** (`pl.DataFrame | None`): A DataFrame containing the equity curve and cash over time.
-- **`trades`** (`pl.DataFrame | None`): A DataFrame containing the executed trades, including entry and exit details.
-- **`_summary`** (`dict | None`): An optional cached dictionary of performance statistics.
+- Data utilities (qstock)
+  - `history(stock_code, scale=240, datalen=3650, timeout=10)` → pl.DataFrame | None
+  - `history_save(stock_code, ...)` → None
+  - `info()` → pl.DataFrame
+  - `info_save(path)` → None
 
-### Methods:
+- Technical indicators (qtalib)
+  - `ma(data, timeperiod=30)` → list[pl.Series]
+  - `ema(data, timeperiod=30)` → list[pl.Series]
+  - `sma(data, timeperiod=20)` → list[pl.Series]
+  - `wma(data, timeperiod=20)` → list[pl.Series]
+  - `bband(data, timeperiod=5, nbdevup=2.0, nbdevdn=2.0)` → list[pl.Series]
+  - `macd(data, fast=12, slow=26, signal=9)` → list[pl.Series]
+  - `rsi(data, timeperiod=14)` → list[pl.Series]
+  - `adx(data, timeperiod=14)` → pl.DataFrame
+  - `adxr(data, timeperiod=14)` → pl.DataFrame
+  - `obv(data)` → pl.DataFrame
+  - `mfi(data, period=14)` → pl.DataFrame
+  - `ultosc(data, short_period=7, medium_period=14, long_period=28)` → pl.DataFrame
 
-#### __init__()
-- Initializes a `Backtrade` object with optional results and trades.
+Notes
 
-#### `run()`
-- Runs a per-symbol independent backtest.
-- **Parameters**:
-  - `data`: DataFrame with historical price data.
-  - `entries`: DataFrame indicating entry signals for each symbol.
-  - `exits`: DataFrame indicating exit signals for each symbol.
-  - `init_cash`: Initial cash for the backtest (default: 100,000).
-  - `fee`: Transaction fee (default: 0.0).
-  - `slip`: Slippage (default: 0.0).
-  - `size`: Trade size (default: 1.0).
-  - `indicators`: Optional list of TA-Lib indicators to apply to the data (default: None).
-- **Returns**: A `Backtrade` object with the backtest results.
+- Most indicator functions accept a Polars DataFrame and either return a DataFrame (with new columns) or a list of Series (one per numeric input column). Check `python/polars_quant/polars_quant.pyi` for exact return types.
+- Many functions expect lowercase OHLC column names: `open`, `high`, `low`, `close`, `volume`.
 
-#### `portfolio()`
-- Runs a portfolio-level backtest with shared capital across all symbols.
-- **Parameters**: Same as `run`.
-- **Returns**: A `Backtrade` object with the portfolio-level backtest results.
+Want a machine-readable mapping (function → output columns)? Ask and I'll generate it from the code.
+## API Reference
 
-#### `results()`
-- Returns the backtest equity/cash DataFrame or `None` if not available.
+本页列出 `qtalib`（Rust 实现并通过 PyO3 暴露）的主要函数签名与返回类型说明。文档以事实为主，省略性能夸张性描述。
 
-#### `trades()`
-- Returns the trade log DataFrame or `None` if not available.
+注意：这些函数通常接受一个 Polars `DataFrame`（列为浮点数）并返回新增列或新的 `DataFrame`。请参考 `python/polars_quant/polars_quant.pyi` 以获取精确的类型提示。
 
-#### `summary()`
-- Returns a text summary of final equity and performance statistics.
+常见输入列：`open`, `high`, `low`, `close`, `volume`（若有）
 
----
+示例函数签名（局部摘要）：
 
-## **TA-Lib**
+- bband(data: DataFrame, timeperiod: int = 5, nbdevup: float = 2.0, nbdevdn: float = 2.0) -> list[Series]
+- dema(data: DataFrame, timeperiod: int = 30) -> list[Series]
+- ema(data: DataFrame, timeperiod: int = 30) -> list[Series]
+- kama(data: DataFrame, timeperiod: int = 30, fast_limit: float = 2.0, slow_limit: float = 30.0) -> list[Series]
+- ma(data: DataFrame, timeperiod: int = 30) -> list[Series]
+- mama(data: DataFrame, c: float = 10.0) -> list[Series]
+- mavp(data: DataFrame, timeperiod: int = 30) -> list[Series]
+- sma(data: DataFrame, timeperiod: int = 20) -> list[Series]
+- t3(data: DataFrame, timeperiod: int = 20, b: float = 0.7) -> list[Series]
+- tema(data: DataFrame, timeperiod: int = 20) -> list[Series]
+- trima(data: DataFrame, timeperiod: int = 20) -> list[Series]
+- wma(data: DataFrame, timeperiod: int = 20) -> list[Series]
 
-The following classes provide easy integration with **TA-Lib** indicators, allowing you to apply popular technical analysis functions to your trading data.
+- adx(data: DataFrame, timeperiod: int = 14) -> DataFrame  ✅ 返回含 `adx` 列的 DataFrame
+- adxr(data: DataFrame, timeperiod: int = 14) -> DataFrame
+- apo(data: DataFrame, fastperiod: int = 12, slowperiod: int = 26) -> list[Series]
 
-### `ATR` Class
-This class applies the **Average True Range (ATR)** indicator to your price data.
+- aroon(data: DataFrame, timeperiod: int = 14) -> DataFrame (包含 `aroon_up{n}` / `aroon_down{n}`)
+- aroonosc(data: DataFrame, timeperiod: int = 14) -> DataFrame
+- macd(data: DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> list[Series]
 
-#### Methods:
+- mfi(data: DataFrame, period: int = 14) -> DataFrame
+- mom(data: DataFrame, period: int = 14) -> DataFrame
+- ppo(data: DataFrame, fastperiod: int = 12, slowperiod: int = 26) -> list[Series]
+- roc(data: DataFrame, timeperiod: int = 10) -> DataFrame
+- rsi(data: DataFrame, timeperiod: int = 14) -> list[Series]
 
-#### `run()`
-- Applies the **ATR** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the ATR calculation (default: 14).
-- **Returns**: A `ATR` object containing the results with the ATR values added to the DataFrame.
+- stoch(...), stochf(...), stochrsi(...) -> DataFrame (详见类型提示文件)
+- trix(data: DataFrame, timeperiod: int = 30) -> DataFrame
+- ultosc(data: DataFrame, short_period: int = 7, medium_period: int = 14, long_period: int = 28) -> DataFrame
+- willr(data: DataFrame, timeperiod: int = 14) -> DataFrame
+- ad(data: DataFrame) -> DataFrame
+- adosc(data: DataFrame, fastperiod: int = 3, slowperiod: int = 10) -> DataFrame
+- obv(data: DataFrame) -> DataFrame
 
-### `BBANDS` Class
-This class applies the **Bollinger Bands (BBANDS)** indicator from TA-Lib.
+更多细节（列名、返回列格式）请直接参考 `python/polars_quant/polars_quant.pyi` 或在 Python 中查看运行时返回值示例。若需我把每个函数的输出列名一一列出，我可以继续生成完整表格。
+Calculates Relative Strength Index.
 
-#### Methods:
+```python
+qtalib.rsi(data, timeperiod=14)
+```
 
-#### `run()`
-- Applies the **BBANDS** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the calculation (default: 20).
-  - `nbdevup`: The number of standard deviations for the upper band (default: 2).
-  - `nbdevdn`: The number of standard deviations for the lower band (default: 2).
-- **Returns**: A `BBANDS` object containing the results with the Bollinger Bands added to the DataFrame.
+**Parameters:**
+- `data` (DataFrame): Price data
+- `timeperiod` (int): Period for calculation (default: 14)
 
-### `CCI` Class
-This class applies the **Commodity Channel Index (CCI)** indicator to your price data.
+**Output Columns:**
+- `rsi`: RSI values
 
-#### Methods:
+### stoch - Stochastic Oscillator
+Calculates Stochastic Oscillator.
 
-#### `run()`
-- Applies the **CCI** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the CCI calculation (default: 20).
-- **Returns**: A `CCI` object containing the results with the CCI values added to the DataFrame.
+```python
+qtalib.stoch(data, fastk_period=5, slowk_period=3, slowd_period=3)
+```
 
-### `EMA` Class
-This class applies the **Exponential Moving Average (EMA)** indicator to your price data.
+**Parameters:**
+- `data` (DataFrame): OHLC data
+- `fastk_period` (int): Fast %K period (default: 5)
+- `slowk_period` (int): Slow %K period (default: 3)
+- `slowd_period` (int): Slow %D period (default: 3)
 
-#### Methods:
+**Output Columns:**
+- `stoch_k`: Slow %K values
+- `stoch_d`: Slow %D values
 
-#### `run()`
-- Applies the **EMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the EMA calculation.
-  - `adjust`: Whether to adjust for the initial values (default: False).
-- **Returns**: A `EMA` object containing the results with the EMA values added to the DataFrame.
+### stochf - Fast Stochastic Oscillator
+Calculates Fast Stochastic Oscillator.
 
-#### `cross()`
-- Checks for crossovers between two EMAs.
-- **Parameters**:
-  - `first_ma`: The first moving average period.
-  - `second_ma`: The second moving average period.
-- **Returns**: A dictionary with cross-over points.
+```python
+qtalib.stochf(data, fastk_period=5, fastd_period=3)
+```
 
-### `KAMA` Class
-This class applies the **Kaufman Adaptive Moving Average (KAMA)** indicator to your price data.
+**Parameters:**
+- `data` (DataFrame): OHLC data
+- `fastk_period` (int): Fast %K period (default: 5)
+- `fastd_period` (int): Fast %D period (default: 3)
 
-#### Methods:
+**Output Columns:**
+- `stoch_k`: Fast %K values
+- `stoch_d`: Fast %D values
 
-#### `run()`
-- Applies the **KAMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the KAMA calculation (default: 14).
-  - `fast_period`: The fast period for KAMA calculation (default: 2).
-  - `slow_period`: The slow period for KAMA calculation (default: 30).
-- **Returns**: A `KAMA` object containing the results with the KAMA values added to the DataFrame.
+### stochrsi - Stochastic RSI
+Calculates Stochastic RSI.
 
-### `MACD` Class
-This class applies the **Moving Average Convergence Divergence (MACD)** indicator from TA-Lib.
+```python
+qtalib.stochrsi(data, timeperiod=14, fastk_period=5, fastd_period=3)
+```
 
-#### Methods:
+**Parameters:**
+- `data` (DataFrame): Price data
+- `timeperiod` (int): RSI period (default: 14)
+- `fastk_period` (int): Fast %K period (default: 5)
+- `fastd_period` (int): Fast %D period (default: 3)
 
-#### `run()`
-- Applies the **MACD** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `fastperiod`: The fast period for MACD calculation (default: 12).
-  - `slowperiod`: The slow period for MACD calculation (default: 26).
-  - `signalperiod`: The period for the MACD signal line (default: 9).
-- **Returns**: A `MACD` object containing the results with the MACD values added to the DataFrame.
+**Output Columns:**
+- `stochrsi_k`: Stochastic RSI %K
+- `stochrsi_d`: Stochastic RSI %D
 
-### `NATR` Class
-This class applies the **Normalized Average True Range (NATR)** indicator to your price data.
+### ultosc - Ultimate Oscillator
+Calculates Ultimate Oscillator.
 
-#### Methods:
+```python
+qtalib.ultosc(data, short_period=7, medium_period=14, long_period=28)
+```
 
-#### `run()`
-- Applies the **NATR** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the NATR calculation (default: 14).
-- **Returns**: A `NATR` object containing the results with the NATR values added to the DataFrame.
+**Parameters:**
+- `data` (DataFrame): OHLC data
+- `short_period` (int): Short period (default: 7)
+- `medium_period` (int): Medium period (default: 14)
+- `long_period` (int): Long period (default: 28)
 
-### `OBV` Class
-This class applies the **On-Balance Volume (OBV)** indicator to your price data.
+**Output Columns:**
+- `ultosc`: Ultimate Oscillator values
 
-#### Methods:
+### willr - Williams' %R
+Calculates Williams' %R.
 
-#### `run()`
-- Applies the **OBV** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `volume_col`: The name of the volume column (default: "Volume").
-  - `price_col`: The name of the price column (default: "Close").
-- **Returns**: A `OBV` object containing the results with the OBV values added to the DataFrame.
+```python
+qtalib.willr(data, timeperiod=14)
+```
 
-### `RSI` Class
-This class applies the **Relative Strength Index (RSI)** indicator from TA-Lib to your price data.
+**Parameters:**
+- `data` (DataFrame): OHLC data
+- `timeperiod` (int): Period for calculation (default: 14)
 
-#### Methods:
+**Output Columns:**
+- `willr{timeperiod}`: Williams' %R values
 
-#### `run()`
-- Applies the **RSI** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the RSI calculation (default: 14).
-- **Returns**: A `RSI` object containing the results with the RSI values added to the DataFrame.
+## 📊 Volume Indicators
 
-### `SMA` Class
-This class applies the **Simple Moving Average (SMA)** indicator to your price data.
+### ad - Accumulation/Distribution Line
+Calculates Accumulation/Distribution Line.
 
-#### Methods:
+```python
+qtalib.ad(data)
+```
 
-#### `run()`
-- Applies the **SMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the SMA calculation.
-- **Returns**: A `SMA` object containing the results with the SMA values added to the DataFrame.
+**Parameters:**
+- `data` (DataFrame): OHLCV data
 
-#### `cross()`
-- Checks for crossovers between two SMAs.
-- **Parameters**:
-  - `first_ma`: The first moving average period.
-  - `second_ma`: The second moving average period.
-- **Returns**: A dictionary with cross-over points.
+**Output Columns:**
+- `clv`: Chaikin Line values
+- `ad`: Accumulation/Distribution values
 
-### `TEMA` Class
-This class applies the **Triple Exponential Moving Average (TEMA)** indicator to your price data.
+### adosc - Chaikin A/D Oscillator
+Calculates Chaikin A/D Oscillator.
 
-#### Methods:
+```python
+qtalib.adosc(data, fastperiod=3, slowperiod=10)
+```
 
-#### `run()`
-- Applies the **TEMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the TEMA calculation (default: 14).
-- **Returns**: A `TEMA` object containing the results with the TEMA values added to the DataFrame.
+**Parameters:**
+- `data` (DataFrame): OHLCV data
+- `fastperiod` (int): Fast period (default: 3)
+- `slowperiod` (int): Slow period (default: 10)
 
-### `TRANGE` Class
-This class calculates the **True Range (TRANGE)** indicator.
+**Output Columns:**
+- Chaikin A/D Oscillator values
 
-#### Methods:
+### mfi - Money Flow Index
+Calculates Money Flow Index.
 
-#### `run()`
-- Calculates the **TRANGE** indicator.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-- **Returns**: A `TRANGE` object containing the results with the True Range values added to the DataFrame.
+```python
+qtalib.mfi(data, period=14)
+```
 
-### `TRIMA` Class
-This class applies the **Triangular Moving Average (TRIMA)** indicator to your price data.
+**Parameters:**
+- `data` (DataFrame): OHLCV data
+- `period` (int): Period for calculation (default: 14)
 
-#### Methods:
+**Output Columns:**
+- `mfi`: Money Flow Index values
 
-#### `run()`
-- Applies the **TRIMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the TRIMA calculation (default: 14).
-- **Returns**: A `TRIMA` object containing the results with the TRIMA values added to the DataFrame.
+### obv - On Balance Volume
+Calculates On Balance Volume.
 
-### `VOL` Class
-This class calculates the **Volatility (VOL)** indicator.
+```python
+qtalib.obv(data)
+```
 
-#### Methods:
+**Parameters:**
+- `data` (DataFrame): Price and volume data
 
-#### `run()`
-- Calculates the **Volatility** indicator.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the Volatility calculation (default: 20).
-  - `method`: The method to calculate volatility ("std" or "range"; default: "std").
-- **Returns**: A `VOL` object containing the results with the Volatility values added to the DataFrame.
+**Output Columns:**
+- `obv`: On Balance Volume values
 
-### `WMA` Class
-This class applies the **Weighted Moving Average (WMA)** indicator to your price data.
+## 🔧 Usage Examples
 
-#### Methods:
+### Basic Technical Analysis
 
-#### `run()`
-- Applies the **WMA** indicator to the provided data.
-- **Parameters**:
-  - `data`: A Polars DataFrame with historical price data (must include numeric columns).
-  - `timeperiod`: The number of periods to use for the WMA calculation.
-- **Returns**: A `WMA` object containing the results with the WMA values added to the DataFrame.
+```python
+import polars as pl
+import polars_quant as plqt
 
-#### `cross()`
-- Checks for crossovers between two WMAs.
-- **Parameters**:
-  - `first_ma`: The first moving average period.
-  - `second_ma`: The second moving average period.
-- **Returns**: A dictionary with cross-over points.
+# Fetch data
+df = plqt.history("sz000001", datalen=200)
+
+# Calculate multiple indicators
+df = df.with_columns([
+    plqt.qtalib.sma(df, 20).alias("SMA20"),
+    plqt.qtalib.rsi(df, 14).alias("RSI"),
+    plqt.qtalib.macd(df, 12, 26, 9).struct.field("macd").alias("MACD")
+])
+
+print(df.tail())
+```
+
+### Advanced Multi-Indicator Analysis
+
+```python
+# Calculate trend indicators
+trend_indicators = df.with_columns([
+    plqt.qtalib.adx(df, 14).alias("ADX"),
+    plqt.qtalib.aroon(df, 14).struct.field("aroon_up").alias("Aroon_Up"),
+    plqt.qtalib.aroon(df, 14).struct.field("aroon_down").alias("Aroon_Down")
+])
+
+# Calculate momentum indicators
+momentum_indicators = df.with_columns([
+    plqt.qtalib.stoch(df, 14, 3, 3).struct.field("stoch_k").alias("Stoch_K"),
+    plqt.qtalib.stoch(df, 14, 3, 3).struct.field("stoch_d").alias("Stoch_D"),
+    plqt.qtalib.cci(df, 20).alias("CCI")
+])
+
+# Calculate volume indicators
+volume_indicators = df.with_columns([
+    plqt.qtalib.mfi(df, 14).alias("MFI"),
+    plqt.qtalib.obv(df).alias("OBV")
+])
+```
+
+## ⚠️ Important Notes
+
+1. **Data Types**: All functions expect Float64 columns for calculations
+2. **Column Names**: Output column names follow the pattern `{original_column}_{indicator}{parameters}`
+3. **NaN Values**: Initial values may be NaN due to calculation requirements
+4. **Performance**: Functions are optimized for performance with vectorized operations
+5. **Memory**: Large datasets are handled efficiently with streaming operations
+
+## 📚 Related Documentation
+
+- [Installation Guide](start/installation.md) - How to install Polars-Quant
+- [Usage Guide](start/usage.md) - Comprehensive usage examples
+- [Features](start/features.md) - Overview of all features</content>
+<parameter name="filePath">c:\Users\28767\Documents\Project\polars-quant\docs\api.md

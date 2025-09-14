@@ -100,7 +100,11 @@ impl Backtrade {
 
                 let p = prices[i];
 
-                if entry_flags[i] && positions == 0 && p > 0.01 {
+                // Optimize condition checks
+                let can_entry = entry_flags[i] && positions == 0 && p > 0.01;
+                let can_exit = exit_flags[i] && positions > 0 && p > 0.01;
+
+                if can_entry {
                     let buy_price = (1.0 + slip) * p;
                     let max_share = (((1.0 - fee) * cash / buy_price) / 100.0).floor() * 100.0;
                     let buy_share = (max_share * size).floor() as i64;
@@ -117,14 +121,12 @@ impl Backtrade {
                             None,
                         ));
                     }
-                } else if exit_flags[i] && positions > 0 && p > 0.01{
-                    if exit_flags[i]{
-                        let sell_price = (1.0 - fee) * (1.0 - slip) * p;
-                        cash += sell_price * positions as f64;
-                        if let Some(last) = trades.last_mut() {
-                            last.4 = Some(today.clone());
-                            last.5 = Some(sell_price);
-                        }
+                } else if can_exit {
+                    let sell_price = (1.0 - fee) * (1.0 - slip) * p;
+                    cash += sell_price * positions as f64;
+                    if let Some(last) = trades.last_mut() {
+                        last.4 = Some(today.clone());
+                        last.5 = Some(sell_price);
                     }
                     positions = 0;
                 }
@@ -206,7 +208,7 @@ impl Backtrade {
         Ok(self.results.clone().map(PyDataFrame))
     }
 
-    fn summary<'py>(&'py mut self, py: Python<'py>) -> PyResult<String> {
+    fn summary<'py>(&'py mut self, py: Python<'py>) -> PyResult<()> {
         if self.summary.is_none() {
             self.cal_summary(py)?;
         }
@@ -284,7 +286,10 @@ Avg Trade Return : {avg:.2}%
             ));
         }
 
-        Ok(out)
+        let builtins = py.import("builtins")?;
+        builtins.getattr("print")?.call1((out,))?;
+
+        Ok(())
     }
 
     fn trades(&self) -> PyResult<Option<PyDataFrame>> {
@@ -543,7 +548,11 @@ impl Portfolio {
                 let exit_flag = exits_all[col_idx][i];
                 let symbol = &trades.last().map(|(first, _, _, _, _, _)| first.clone()).unwrap_or("None".into());
 
-                if entry_flag && positions == 0 && p > 0.01 {
+                // Optimize condition checks
+                let can_entry = entry_flag && positions == 0 && p > 0.01;
+                let can_exit = positions > 0 && sym == symbol && p > 0.01 && exit_flag;
+
+                if can_entry {
                     let buy_price = (1.0 + slip) * p;
                     let max_share = (((1.0 - fee) * cash / buy_price) / 100.0).floor() * 100.0;
                     let buy_share = (max_share * size).floor() as i64;
@@ -562,17 +571,14 @@ impl Portfolio {
                     }
                 }
 
-                if positions > 0 && sym == symbol && p > 0.01{
-                    
-                    if exit_flag{
-                        let sell_price = (1.0 - fee) * (1.0 - slip) * p;
-                        cash += sell_price * positions as f64;
-                        if let Some(last) = trades.last_mut() {
-                            last.4 = Some(today.clone());
-                            last.5 = Some(sell_price);
-                        }
-                        positions = 0;
+                if can_exit {
+                    let sell_price = (1.0 - fee) * (1.0 - slip) * p;
+                    cash += sell_price * positions as f64;
+                    if let Some(last) = trades.last_mut() {
+                        last.4 = Some(today.clone());
+                        last.5 = Some(sell_price);
                     }
+                    positions = 0;
                 }
                 equity = cash + p * positions as f64;
             }
@@ -631,7 +637,7 @@ impl Portfolio {
         Ok(self.results.clone().map(PyDataFrame))
     }
 
-    fn summary<'py>(&'py mut self, py: Python<'py>) -> PyResult<String> {
+    fn summary<'py>(&'py mut self, py: Python<'py>) -> PyResult<()> {
         if self.summary.is_none() {
             self.cal_summary(py)?;
         }
@@ -692,7 +698,10 @@ impl Portfolio {
         "#,
         ));
 
-        Ok(out)
+        let builtins = py.import("builtins")?;
+        builtins.getattr("print")?.call1((out,))?;
+
+        Ok(())
     }
 
     fn trades(&self) -> PyResult<Option<PyDataFrame>> {
