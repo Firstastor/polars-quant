@@ -181,7 +181,6 @@ class Backtrade:
         and per-symbol breakdowns with win rates and profit factors.
         """
 
-
 class Portfolio:
     """
     Portfolio class for backtesting with shared capital across multiple symbols.

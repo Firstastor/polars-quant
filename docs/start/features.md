@@ -1,122 +1,21 @@
-# Features
+# 特性
 
-Polars-Quant is a high-performance quantitative trading library built on Rust and Python, designed for fast backtesting and technical analysis.
+- 纯向量化，贴合 Polars 风格：以 DataFrame 为核心，返回 Series 或带指标列的 DataFrame。
+- 高性能：底层 Rust 实现 + 多线程并行，适合中小规模回测与策略研究。
+- 简明 API：以 `python/polars_quant/polars_quant.pyi` 为准，函数签名清晰统一。
+- 两种回测形态：
+  - Backtrade.run：各标的独立回测，独立资金曲线。
+  - Backtrade.portfolio / Portfolio.run：组合级回测，共享资金池。
+- 贴心数据函数：抓取并保存 A 股历史数据与基础信息，快速落地研究。
+- 轻量依赖：仅依赖 Polars 与 PyArrow，无 GPU 需求。
 
-## 🚀 Core Features
+适用场景
 
-### High-Performance Backtesting Engine
-- **Rust-powered core**: Lightning-fast execution with zero-cost abstractions
-- **Vectorized operations**: Leverage Polars DataFrames for efficient computations
-- **Parallel processing**: Multi-threaded execution for large datasets
-- **Memory efficient**: Low memory footprint with optimized data structures
+- 技术指标研究、信号原型验证
+- 单标的或多标的简易回测、快节奏迭代
+- 与 Polars/Python 科研生态无缝衔接
 
-### Comprehensive Technical Analysis
-- **50+ indicators**: Complete TA-Lib integration with all major indicators
-- **Custom indicators**: Easy-to-extend framework for custom calculations
-- **Real-time updates**: Support for streaming data and live calculations
-- **Multi-timeframe**: Analysis across different time periods
+不是什么
 
-### Advanced Backtesting Framework
-- **Portfolio-level backtesting**: Multi-asset portfolio simulation
-- **Risk management**: Built-in position sizing and risk controls
-- **Performance metrics**: Comprehensive statistics and analytics
-- **Strategy optimization**: Parameter optimization and walk-forward analysis
-
-## 📊 Technical Indicators
-
-### Trend Indicators
-- **Moving Averages**: SMA, EMA, WMA, DEMA, TEMA
-- **MACD**: Moving Average Convergence Divergence with signal line
-- **ADX**: Average Directional Movement Index
-- **Parabolic SAR**: Stop and Reverse system
-- **Ichimoku Cloud**: Complete cloud analysis
-
-### Momentum Indicators
-
-Features
-
-This page lists implemented, verifiable features. I reviewed the code in `src/` and the Python stubs in `python/polars_quant/polars_quant.pyi` to produce this list.
-
-Indicators (implemented)
-
-- Moving averages: SMA, EMA, WMA, T3, TEMA
-- MACD
-- RSI
-- Bollinger Bands (bband)
-- ADX / ADXR
-- On Balance Volume (OBV), Accumulation/Distribution (AD), ADOSC
-- Stochastic indicators (stoch, stochf, stochrsi)
-- CCI, CMO, ROC, MOM, PPO, ATR-like measures
-
-Backtesting / Utilities
-
-- A `Backtrade` class (basic backtesting scaffolding as exposed in the Python stubs)
-- `Portfolio` utilities (as in `polars_quant.pyi`)
-
-Notes and constraints
-
-- No GPU-specific code or claims were found in the repository; documentation and examples should not claim GPU acceleration.
-- For exact function signatures and return types, consult `python/polars_quant/polars_quant.pyi` which is authoritative for the Python API.
-- **Monitoring**: Performance monitoring and alerting
-
-## 🌐 Ecosystem Integration
-
-### Python Ecosystem
-- **Pandas compatibility**: Easy migration from pandas-based workflows
-- **NumPy integration**: Seamless array operations
-- **Scikit-learn**: Machine learning integration
-- **Plotly/Dash**: Interactive visualizations
-
-### Trading Platforms
-- **Broker APIs**: Integration with popular brokers
-- **Exchange APIs**: Direct exchange connectivity
-- **Trading software**: Integration with MetaTrader, TradingView
-- **Portfolio management**: Connection to portfolio management systems
-
-## 📈 Use Cases
-
-### Individual Traders
-- **Strategy development**: Rapid prototyping and testing
-- **Portfolio management**: Personal portfolio tracking
-- **Risk assessment**: Individual position risk analysis
-- **Performance tracking**: Detailed trading performance metrics
-
-### Quantitative Funds
-- **High-frequency trading**: Ultra-low latency execution
-- **Portfolio optimization**: Modern portfolio theory implementation
-- **Risk management**: Enterprise-grade risk controls
-- **Compliance reporting**: Regulatory reporting and documentation
-
-### Academic Research
-- **Financial research**: Empirical analysis and testing
-- **Strategy validation**: Academic paper replication
-- **Data analysis**: Large-scale financial data processing
-- **Teaching**: Educational tools for finance courses
-
-### Financial Institutions
-- **Algorithmic trading**: Production-ready trading algorithms
-- **Market making**: Automated market making strategies
-- **Arbitrage**: Statistical and triangular arbitrage
-- **Risk modeling**: Advanced risk modeling and stress testing
-
-## 🔮 Future Roadmap
-
-### Planned Features
-- **Machine Learning**: Integrated ML pipeline for strategy development
-- **Options trading**: Complete options pricing and strategies
-- **Crypto trading**: Cryptocurrency exchange integration
-- **International markets**: Global market data and trading
-- **Real-time alerts**: Automated trading signal notifications
-- **Web interface**: Browser-based strategy builder and analyzer
-
-### Performance Improvements
-- **GPU acceleration**: CUDA/OpenCL support for massive parallelization
-- **Database integration**: Native database connectors for high-speed data access
-- **Streaming analytics**: Real-time streaming data processing
-- **Memory optimization**: Further memory usage reductions
-
-### Enterprise Features
-- **Multi-user support**: Team collaboration and strategy sharing
-- **Audit trails**: Complete audit logging for compliance
-- **API management**: Rate limiting and API key management
-- **Cloud deployment**: One-click cloud deployment and scaling
+- 这不是全功能交易平台；不含订单撮合、组合优化、风控引擎等重量模块。
+- 更偏向“研究驱动”，而非“生产交易系统”。

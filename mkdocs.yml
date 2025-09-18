@@ -19,11 +19,11 @@ markdown_extensions:
   - pymdownx.tabbed
 
 nav:
-  - Start:
+  - 开始:
       - index.md
-      - Features: start/features.md
-      - Installation: start/installation.md
-      - Usage: start/usage.md
+      - 特性: start/features.md
+      - 安装: start/installation.md
+      - 使用: start/usage.md
   - API: api.md
 
 plugins:
@@ -31,7 +31,7 @@ plugins:
 
 theme:
   name: material
-  language: en
+  language: zh
   features:
     - navigation.indexes
     - navigation.instant

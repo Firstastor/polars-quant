@@ -1,6 +1,6 @@
 [project]
 name = "polars-quant"
-version = "0.2.0"
+version = "0.3.0"
 description = "Blazingly Fast Polars Quant Tool"
 readme = "README.md"
 authors = [
