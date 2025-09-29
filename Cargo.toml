@@ -10,7 +10,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 futures = "0.3.31"
+<<<<<<< HEAD
 num_cpus = "1.17.0"
+=======
+>>>>>>> 8e6a0633c5c9236cfaf59257d39008ef4a446c81
 polars = { version = "0.51.0", features = ["full"] }
 pyo3 = { version = "0.25.1", features = ["abi3-py39", "extension-module"] }
 pyo3-polars = "0.24.0"
