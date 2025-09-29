@@ -1,6 +1,6 @@
 [project]
 name = "polars-quant"
-version = "0.2.0"
+version = "0.3.0"
 description = "Blazingly Fast Polars Quant Tool"
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "polars>=1.31",
+    "polars>=1.33.1",
     "pyarrow>=21.0.0",
 ]
 
