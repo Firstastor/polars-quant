@@ -12,25 +12,26 @@ use rustc_hash::FxHashMap;
 // 高性能HashMap类型别名
 type FastHashMap<K, V> = FxHashMap<K, V>;
 
-// 性能优化：预编译的常量
-const INITIAL_CAPACITY: usize = 1024; // 预分配容量
-const BATCH_SIZE: usize = 256; // 批处理大小
-const FLOAT_EPSILON: f64 = 1e-10; // 浮点数精度常量
+// 常用常量
+const INITIAL_CAPACITY: usize = 1024;
+const BATCH_SIZE: usize = 256;
+const FLOAT_EPSILON: f64 = 1e-10;
+
 
 // ============================================================================
-// SIMD向量化计算模块 - 极限性能优化第一步
+// 向量化计算模块
 // ============================================================================
 
-/// SIMD优化的批量价格计算
+/// 批量乘法运算
 #[inline(always)]
-pub fn simd_batch_multiply(prices: &[f64], quantities: &[f64], output: &mut [f64]) {
+pub fn batch_multiply(prices: &[f64], quantities: &[f64], output: &mut [f64]) {
     assert_eq!(prices.len(), quantities.len());
     assert_eq!(prices.len(), output.len());
     
     let chunks = prices.len() / 4;
     let remainder = prices.len() % 4;
     
-    // 使用SIMD处理4个元素的批次
+    // 使用向量化处理4个元素的批次
     for i in 0..chunks {
         let base = i * 4;
         
@@ -60,9 +61,9 @@ pub fn simd_batch_multiply(prices: &[f64], quantities: &[f64], output: &mut [f64
     }
 }
 
-/// SIMD优化的累加求和
+/// 向量化求和
 #[inline(always)]  
-pub fn simd_sum(values: &[f64]) -> f64 {
+pub fn vector_sum(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
@@ -72,7 +73,7 @@ pub fn simd_sum(values: &[f64]) -> f64 {
     
     let mut sum_vec = f64x4::splat(0.0);
     
-    // SIMD批量求和
+    // 批量求和
     for i in 0..chunks {
         let base = i * 4;
         let vec = f64x4::new([
@@ -95,18 +96,92 @@ pub fn simd_sum(values: &[f64]) -> f64 {
     total
 }
 
-/// SIMD优化的价格更新
-#[inline(always)]
-pub fn simd_update_positions(
-    current_prices: &[f64], 
-    quantities: &[f64], 
-    unrealized_pnl: &mut [f64]
-) {
-    simd_batch_multiply(current_prices, quantities, unrealized_pnl);
+// ============================================================================
+// 辅助函数：更健壮的数据提取
+// ============================================================================
+
+#[inline]
+fn series_to_bool_vec(s: &Column, fallback_len: usize) -> PolarsResult<Vec<bool>> {
+    match s.dtype() {
+        DataType::Boolean => {
+            Ok(
+                s.bool()?
+                    .into_iter()
+                    .map(|v| v.unwrap_or(false))
+                    .collect(),
+            )
+        }
+        _ => {
+            // 尝试转换为布尔；失败则回退为全 false
+            match s.cast(&DataType::Boolean) {
+                Ok(casted) => Ok(
+                    casted
+                        .bool()?
+                        .into_iter()
+                        .map(|v| v.unwrap_or(false))
+                        .collect(),
+                ),
+                Err(_) => Ok(vec![false; fallback_len]),
+            }
+        }
+    }
+}
+
+#[inline]
+fn backfill_f64<I: IntoIterator<Item = Option<f64>>>(iter: I) -> Vec<f64> {
+    let vals: Vec<Option<f64>> = iter.into_iter().collect();
+    let mut out = vec![0.0; vals.len()];
+    let mut next_valid: Option<f64> = None;
+    for i in (0..vals.len()).rev() {
+        if let Some(v) = vals[i] {
+            out[i] = v;
+            next_valid = Some(v);
+        } else if let Some(v) = next_valid {
+            out[i] = v;
+        } else {
+            // 序列尾部全是缺失时，用0.0兜底
+            out[i] = 0.0;
+        }
+    }
+    out
+}
+
+/// 批量计算辅助函数
+mod batch_helpers {
+    use super::*;
+    
+    /// 批量计算持仓价值
+    #[inline]
+    pub fn batch_position_values(positions: &[&Position], prices: &[f64]) -> Vec<f64> {
+        positions.iter()
+            .zip(prices.iter())
+            .map(|(pos, &price)| pos.quantity * price)
+            .collect()
+    }
+    
+    /// 批量计算未实现盈亏
+    #[inline] 
+    pub fn batch_unrealized_pnl(
+        quantities: &[f64], 
+        avg_prices: &[f64], 
+        current_prices: &[f64]
+    ) -> Vec<f64> {
+        quantities.iter()
+            .zip(avg_prices.iter())
+            .zip(current_prices.iter())
+            .map(|((&qty, &avg), &curr)| {
+                if qty.abs() > FLOAT_EPSILON {
+                    qty * (curr - avg)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
 }
 
 // ============================================================================
-// 多线程并行优化模块 - 极限性能优化第二步
+// 并行计算模块
 // ============================================================================
 
 /// 并行处理股票数据的分块结果
@@ -116,7 +191,7 @@ struct ParallelChunkResult {
     chunk_performance: f64,
 }
 
-/// 并行处理单个股票的回测逻辑
+/// 处理单个股票的回测逻辑
 fn process_symbol_parallel(
     symbol: &str,
     price_data: &[f64],
@@ -276,30 +351,10 @@ impl ParallelBacktestProcessor {
 }
 
 // ============================================================================
-// 高性能优化模块 - 基于pyrust-bt等高性能库的启发
+// 优化模块
 // ============================================================================
 
-/// 高性能内存池 - 减少动态分配
-struct OrderPool {
-    orders: Vec<Order>,
-    next_free: usize,
-}
-
-impl OrderPool {
-    fn with_capacity(cap: usize) -> Self {
-        Self {
-            orders: Vec::with_capacity(cap),
-            next_free: 0,
-        }
-    }
-    
-    #[inline]
-    fn get_order(&mut self, id: String, symbol: String, side: Side, quantity: f64, timestamp: i64) -> Order {
-        Order::new_market_order(id, symbol, side, quantity, timestamp)
-    }
-}
-
-/// 高性能价格缓存 - 提高数据局部性
+/// 价格缓存 - 提高数据局部性
 #[derive(Clone)]
 struct PriceCache {
     data: Vec<f64>,
@@ -341,40 +396,6 @@ impl PriceCache {
             prices.insert(symbol.clone(), self.data[i]);
         }
         prices
-    }
-}
-
-/// SIMD风格的批量计算辅助函数
-mod simd_helpers {
-    use super::*;
-    
-    /// 批量计算持仓价值 - 向量化操作
-    #[inline]
-    pub fn batch_calculate_position_values(positions: &[&Position], prices: &[f64]) -> Vec<f64> {
-        positions.iter()
-            .zip(prices.iter())
-            .map(|(pos, &price)| pos.quantity * price)
-            .collect()
-    }
-    
-    /// 批量计算盈亏 - 优化内存访问模式
-    #[inline] 
-    pub fn batch_calculate_unrealized_pnl(
-        quantities: &[f64], 
-        avg_prices: &[f64], 
-        current_prices: &[f64]
-    ) -> Vec<f64> {
-        quantities.iter()
-            .zip(avg_prices.iter())
-            .zip(current_prices.iter())
-            .map(|((&qty, &avg), &curr)| {
-                if qty.abs() > FLOAT_EPSILON {
-                    qty * (curr - avg)
-                } else {
-                    0.0
-                }
-            })
-            .collect()
     }
 }
 
@@ -452,11 +473,11 @@ impl Order {
     }
 }
 
-/// 高性能持仓结构体 - 优化内存布局
+/// 持仓结构体
 #[derive(Debug, Clone)]
 pub struct Position {
     pub symbol: String,
-    // 内存对齐优化：将频繁访问的f64字段放在一起
+    // 频繁访问的字段
     pub quantity: f64,     // 正数为多头，负数为空头
     pub avg_price: f64,    // 平均成本价
     pub total_cost: f64,   // 总成本
@@ -465,7 +486,7 @@ pub struct Position {
 }
 
 impl Position {
-    #[inline] // 内联优化
+    #[inline]
     pub fn new(symbol: String) -> Self {
         Self {
             symbol,
@@ -477,7 +498,7 @@ impl Position {
         }
     }
 
-    /// 高性能更新持仓 - 减少分支预测失败
+    /// 更新持仓
     #[inline]
     pub fn update(&mut self, side: Side, quantity: f64, price: f64, fees: f64) {
         let signed_quantity = match side {
@@ -485,17 +506,16 @@ impl Position {
             Side::Sell => -quantity,
         };
 
-        // 优化：使用位运算减少分支
         let is_zero_position = self.quantity.abs() < f64::EPSILON;
         let same_direction = (self.quantity > 0.0) == (signed_quantity > 0.0);
 
         if is_zero_position {
-            // 开新仓 - 快速路径
+            // 开新仓
             self.quantity = signed_quantity;
             self.avg_price = price;
             self.total_cost = quantity * price + fees;
         } else if same_direction && !is_zero_position {
-            // 加仓 - 优化计算
+            // 加仓
             let old_value = self.quantity * self.avg_price;
             let new_value = signed_quantity * price;
             let new_quantity = self.quantity + signed_quantity;
@@ -508,7 +528,6 @@ impl Position {
             let close_quantity = signed_quantity.abs().min(self.quantity.abs());
             let remaining_quantity = self.quantity + signed_quantity;
             
-            // 快速计算已实现盈亏
             let realized = if self.quantity > 0.0 {
                 close_quantity * (price - self.avg_price) - fees
             } else {
@@ -518,7 +537,6 @@ impl Position {
             self.realized_pnl += realized;
             self.quantity = remaining_quantity;
             
-            // 快速零位检查
             if remaining_quantity.abs() < f64::EPSILON {
                 self.quantity = 0.0;
                 self.avg_price = 0.0;
@@ -527,7 +545,6 @@ impl Position {
         }
     }
 
-    /// 内联优化的浮动盈亏计算
     #[inline]
     /// 计算持仓市值（需要当前价格）
     pub fn position_value(&self, current_price: f64) -> f64 {
@@ -702,9 +719,9 @@ impl Portfolio {
         Ok(())
     }
 
-    /// 更新所有持仓的浮动盈亏 - SIMD优化版本
+    /// 更新所有持仓的浮动盈亏
     pub fn update_positions(&mut self, prices: &HashMap<String, f64>) {
-        // 传统单个更新方式 - 小规模数据
+        // 小规模数据使用简单更新
         if self.positions.len() < 8 {
             for (symbol, position) in &mut self.positions {
                 if let Some(&current_price) = prices.get(symbol) {
@@ -714,7 +731,7 @@ impl Portfolio {
             return;
         }
         
-        // SIMD批量更新 - 大规模数据优化
+        // 大规模数据使用批量更新
         let symbols: Vec<String> = self.positions.keys().cloned().collect();
         let mut current_prices = Vec::with_capacity(symbols.len());
         let mut quantities = Vec::with_capacity(symbols.len());
@@ -734,7 +751,7 @@ impl Portfolio {
             }
         }
         
-        // SIMD批量计算价差和未实现盈亏
+        // 批量计算价差和未实现盈亏
         let mut price_diffs = vec![0.0; current_prices.len()];
         for i in 0..current_prices.len() {
             price_diffs[i] = current_prices[i] - avg_prices[i];
@@ -742,7 +759,7 @@ impl Portfolio {
         
         let mut unrealized_values = vec![0.0; price_diffs.len()];
         if !price_diffs.is_empty() {
-            simd_batch_multiply(&price_diffs, &quantities, &mut unrealized_values);
+            batch_multiply(&price_diffs, &quantities, &mut unrealized_values);
         }
         
         // 更新持仓数据
@@ -755,24 +772,18 @@ impl Portfolio {
         }
     }
 
-    /// 计算总权益 - SIMD优化版本（使用当前价格）
+    /// 计算总权益（使用当前价格）
     pub fn total_equity_with_prices(&self, current_prices: &HashMap<String, f64>) -> f64 {
-        if self.positions.is_empty() {
-            return self.cash;
-        }
-        
-        // 计算持仓市值而不是unrealized_pnl
         let mut total_position_value = 0.0;
         for (symbol, position) in &self.positions {
             if let Some(&current_price) = current_prices.get(symbol) {
                 total_position_value += position.quantity.abs() * current_price;
             }
         }
-        
         self.cash + total_position_value
     }
 
-    /// 计算总权益 - SIMD优化版本
+    /// 计算总权益
     pub fn total_equity(&self) -> f64 {
         if self.positions.is_empty() {
             return self.cash;
@@ -786,12 +797,12 @@ impl Portfolio {
             return self.cash + unrealized_pnl;
         }
         
-        // 大规模数据使用SIMD优化
+        // 大规模数据使用向量化求和
         let unrealized_values: Vec<f64> = self.positions.values()
             .map(|p| p.unrealized_pnl)
             .collect();
             
-        let total_unrealized = simd_sum(&unrealized_values);
+        let total_unrealized = vector_sum(&unrealized_values);
         self.cash + total_unrealized
     }
 
@@ -807,7 +818,7 @@ impl Portfolio {
 // 回测引擎
 // ============================================================================
 
-/// 高性能回测引擎
+/// 回测引擎
 pub struct BacktestEngine {
     pub portfolio: Portfolio,
     pub data: DataFrame,
@@ -817,7 +828,7 @@ pub struct BacktestEngine {
     pub daily_records: Vec<DailyRecord>,
     pub start_time: Option<std::time::Instant>,
     pub end_time: Option<std::time::Instant>,
-    pub backtest_duration_ms: u64, // 添加缺失的字段
+    pub backtest_duration_ms: u64,
 }
 
 /// 回测记录
@@ -854,23 +865,25 @@ impl BacktestEngine {
         })
     }
 
-    /// 高性能回测运行 - 参考pyrust-bt架构优化
+    /// 回测运行
     pub fn run(&mut self) -> PolarsResult<()> {
         self.run_with_parallelism(None)
     }
     
-    /// 并行回测运行 - 极限性能优化版本
+    /// 并行回测运行
     pub fn run_with_parallelism(&mut self, enable_parallel: Option<bool>) -> PolarsResult<()> {
         self.start_time = Some(std::time::Instant::now());
         
         let data_height = self.data.height();
-        let price_columns: Vec<String> = self.data.get_column_names()
+        let price_columns: Vec<String> = self
+            .data
+            .get_column_names()
             .iter()
-            .filter(|&col| col.as_str() != "Date")
+            .filter(|&col| col.as_str() != "Date" && col.as_str() != "date")
             .map(|col| col.to_string())
             .collect();
 
-        // 使用更快的HashMap - 极限优化
+        // 使用更快的HashMap
         let mut price_data: FastHashMap<String, Vec<f64>> = FastHashMap::default();
         price_data.reserve(price_columns.len());
         
@@ -880,20 +893,17 @@ impl BacktestEngine {
         let mut exit_data: FastHashMap<String, Vec<bool>> = FastHashMap::default();
         exit_data.reserve(price_columns.len());
         
-        // 批量提取数据
+        // 批量提取数据（价格：向后插入法 backfill；尾部仍缺失用0.0兜底）
         for symbol in &price_columns {
-            let prices = self.data.column(symbol)?.f64()?
-                .into_no_null_iter()
-                .collect::<Vec<f64>>();
+            let col = self.data.column(symbol)?.f64()?;
+            let prices = backfill_f64(col.into_iter());
             price_data.insert(symbol.clone(), prices);
         }
         
-        // 批量提取信号数据
+        // 批量提取信号数据（null -> false；可尝试类型转换）
         for symbol in &price_columns {
             if let Ok(entry_col) = self.entry_signals.column(symbol) {
-                let entries = entry_col.bool()?
-                    .into_no_null_iter()
-                    .collect::<Vec<bool>>();
+                let entries = series_to_bool_vec(entry_col, data_height)?;
                 entry_data.insert(symbol.clone(), entries);
             } else {
                 entry_data.insert(symbol.clone(), vec![false; data_height]);
@@ -902,22 +912,43 @@ impl BacktestEngine {
         
         for symbol in &price_columns {
             if let Ok(exit_col) = self.exit_signals.column(symbol) {
-                let exits = exit_col.bool()?
-                    .into_no_null_iter()
-                    .collect::<Vec<bool>>();
+                let exits = series_to_bool_vec(exit_col, data_height)?;
                 exit_data.insert(symbol.clone(), exits);
             } else {
                 exit_data.insert(symbol.clone(), vec![false; data_height]);
             }
         }
 
-        // 获取日期数据
-        let date_strings = self.data.column("Date")?.str()?
+        // 获取日期数据（兼容 Date/date；统一转 String 再读取）
+        let date_series = if self
+            .data
+            .get_column_names()
+            .iter()
+            .any(|c| c.as_str() == "Date")
+        {
+            self.data.column("Date")?
+        } else if self
+            .data
+            .get_column_names()
+            .iter()
+            .any(|c| c.as_str() == "date")
+        {
+            self.data.column("date")?
+        } else {
+            return Err(PolarsError::ComputeError("Date/date column not found".into()));
+        };
+        let date_utf8 = if date_series.dtype() != &DataType::String {
+            date_series.cast(&DataType::String)?
+        } else {
+            date_series.clone()
+        };
+        let date_strings = date_utf8
+            .str()?
             .into_no_null_iter()
             .collect::<Vec<_>>();
 
         // 判断是否使用并行处理
-        let use_parallel = enable_parallel.unwrap_or(price_columns.len() >= 10); // 10个以上股票使用并行
+        let use_parallel = enable_parallel.unwrap_or(price_columns.len() >= 10);
         
         if use_parallel && price_columns.len() > 1 {
             // 并行处理版本
@@ -978,7 +1009,6 @@ impl BacktestEngine {
                 let current_equity = self.portfolio.total_equity_with_prices(&current_prices);
                 let daily_pnl = current_equity - prev_equity;
                 let realized_pnl = self.portfolio.realized_pnl();
-                // 直接从positions获取unrealized_pnl，避免循环依赖
                 let unrealized_pnl: f64 = self.portfolio.positions.values()
                     .map(|p| p.unrealized_pnl)
                     .sum();
@@ -1004,16 +1034,16 @@ impl BacktestEngine {
                 prev_equity = current_equity;
             }
         } else {
-            // 单线程优化版本（原来的逻辑但使用FastHashMap）
+            // 单线程版本
             let data_height = price_data.values().next().map_or(0, |v| v.len());
             let mut order_id_counter = 0u64;
-            let mut prev_equity = self.portfolio.initial_cash; // 初始化时使用initial_cash
+            let mut prev_equity = self.portfolio.initial_cash;
 
             // 主回测循环
             for i in 0..data_height {
                 let timestamp = i as i64;
                 
-                // 构建当前价格映射 - 使用FastHashMap
+                // 构建当前价格映射
                 let mut current_prices: FastHashMap<String, f64> = FastHashMap::default();
                 current_prices.reserve(price_columns.len());
                 
@@ -1090,7 +1120,7 @@ impl BacktestEngine {
                     }
                 }
 
-                // 更新持仓（使用SIMD优化版本）
+                // 更新持仓
                 let std_prices: HashMap<String, f64> = current_prices.iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
@@ -1101,7 +1131,6 @@ impl BacktestEngine {
                     let current_equity = self.portfolio.total_equity_with_prices(&std_prices);
                     let daily_pnl = current_equity - prev_equity;
                     let realized_pnl = self.portfolio.realized_pnl();
-                    // 直接从positions获取unrealized_pnl，避免循环依赖
                     let unrealized_pnl: f64 = self.portfolio.positions.values()
                         .map(|p| p.unrealized_pnl)
                         .sum();
@@ -1115,15 +1144,9 @@ impl BacktestEngine {
                         daily_pnl,
                     });
 
-                    // 使用FastHashMap记录状态
-                    let mut positions_snapshot: FastHashMap<String, f64> = FastHashMap::default();
-                    for (symbol, position) in &self.portfolio.positions {
-                        positions_snapshot.insert(symbol.clone(), position.quantity);
-                    }
-                    
-                    // 转换为标准HashMap用于兼容性
-                    let std_positions: HashMap<String, f64> = positions_snapshot.iter()
-                        .map(|(k, v)| (k.clone(), *v))
+                    // 记录持仓状态
+                    let std_positions: HashMap<String, f64> = self.portfolio.positions.iter()
+                        .map(|(k, v)| (k.clone(), v.quantity))
                         .collect();
 
                     self.results.push(BacktestRecord {
@@ -1158,7 +1181,7 @@ impl BacktestEngine {
 
         let initial_equity = self.portfolio.initial_cash;  // 使用真正的初始资金
         
-        // 使用trades的总PNL来计算正确的总收益，因为equity计算可能不包含所有已实现盈亏
+        // 使用trades的总PNL来计算正确的总收益
         let total_trade_pnl: f64 = self.portfolio.trades.iter().map(|t| t.pnl).sum();
         let total_fees: f64 = self.portfolio.trades.iter().map(|t| t.fees).sum();
         let net_pnl = total_trade_pnl - total_fees;
@@ -1171,22 +1194,9 @@ impl BacktestEngine {
             0.0
         };
 
-        // 计算最大回撤 - 修复逻辑
+        // 计算最大回撤
         let mut peak = initial_equity;
         let mut max_drawdown = 0.0;
-        let mut peak_to_trough = 0.0;
-        
-        // 调试：检查equity序列
-        eprintln!("回撤计算调试:");
-        eprintln!("初始资金: {}", initial_equity);
-        eprintln!("前10个equity记录:");
-        for (i, record) in self.results.iter().take(10).enumerate() {
-            eprintln!("  记录{}: equity = {}", i, record.equity);
-        }
-        eprintln!("后10个equity记录:");
-        for (i, record) in self.results.iter().rev().take(10).enumerate() {
-            eprintln!("  倒数第{}: equity = {}", i+1, record.equity);
-        }
         
         for record in &self.results {
             // 更新峰值
@@ -1194,20 +1204,13 @@ impl BacktestEngine {
                 peak = record.equity;
             }
             
-            // 计算回撤 - 确保peak > 0避免除零
+            // 计算回撤
             if peak > 0.0 {
                 let drawdown = (peak - record.equity) / peak;
-                let drawdown_amount = peak - record.equity;
-                
-                // 限制回撤在合理范围内 [0, 1]
                 let normalized_drawdown = drawdown.max(0.0).min(1.0);
                 
                 if normalized_drawdown > max_drawdown {
                     max_drawdown = normalized_drawdown;
-                    eprintln!("发现新的最大回撤: {:.6} (peak={}, current={})", normalized_drawdown, peak, record.equity);
-                }
-                if drawdown_amount > peak_to_trough && drawdown_amount >= 0.0 {
-                    peak_to_trough = drawdown_amount;
                 }
             }
         }
@@ -1228,16 +1231,16 @@ impl BacktestEngine {
 
         BacktestSummary {
             initial_equity,
-            final_equity: corrected_final_equity, // 使用修正的最终权益
+            final_equity: corrected_final_equity,
             total_return,
-            total_return_pct, // 使用正确的百分比
+            total_return_pct,
             max_drawdown: max_drawdown * 100.0,
             max_drawdown_pct: max_drawdown * 100.0,
-            max_drawdown_amount: peak_to_trough,
+            max_drawdown_amount: 0.0,
             total_trades: num_trades,
             win_rate,
             total_fees,
-            realized_pnl: net_pnl, // 使用净PNL
+            realized_pnl: net_pnl,
         }
     }
 }
@@ -1273,15 +1276,14 @@ pub struct BacktestSummary {
 impl fmt::Display for BacktestSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== 回测报告 ===")?;
-        writeln!(f, "初始资金: ${:.2}", self.initial_equity)?;
-        writeln!(f, "最终权益: ${:.2}", self.final_equity)?;
+        writeln!(f, "初始资金: {:.2}", self.initial_equity)?;
+        writeln!(f, "最终权益: {:.2}", self.final_equity)?;
         writeln!(f, "总收益率: {:.2}%", self.total_return_pct)?;
         writeln!(f, "最大回撤: {:.2}%", self.max_drawdown)?;
-        writeln!(f, "最大回撤金额: ${:.2}", self.max_drawdown_amount)?;
         writeln!(f, "交易次数: {}", self.total_trades)?;
         writeln!(f, "胜率: {:.2}%", self.win_rate)?;
-        writeln!(f, "总手续费: ${:.2}", self.total_fees)?;
-        writeln!(f, "已实现盈亏: ${:.2}", self.realized_pnl)?;
+        writeln!(f, "总手续费: {:.2}", self.total_fees)?;
+        writeln!(f, "已实现盈亏: {:.2}", self.realized_pnl)?;
         Ok(())
     }
 }
@@ -1298,6 +1300,12 @@ pub struct Backtrade {
     trades: Vec<Trade>,
     daily_records: Vec<DailyRecord>,
     backtest_duration_ms: f64,
+    // Plot-related cached data
+    dates: Vec<String>,
+    price_series: Vec<f64>,
+    price_label: String,
+    traded_volume: Vec<f64>,
+    traded_amount: Vec<f64>,
 }
 
 #[pymethods]
@@ -1336,12 +1344,70 @@ impl Backtrade {
         // 使用BacktestEngine的实际耗时
         let duration_ms = engine.backtest_duration_ms as f64;
 
+        // 准备绘图数据：日期、主价格序列、成交量/成交额（由成交记录聚合）
+        // 1) 提取日期
+        let date_col_name_opt = if data_df.get_column_names().iter().any(|c| c.as_str() == "Date") {
+            Some("Date")
+        } else if data_df.get_column_names().iter().any(|c| c.as_str() == "date") {
+            Some("date")
+        } else {
+            None
+        };
+
+        let dates: Vec<String> = if let Some(dc) = date_col_name_opt {
+            let ds = data_df.column(dc).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            let ds = if ds.dtype() != &DataType::String { ds.cast(&DataType::String).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))? } else { ds.clone() };
+            ds.str().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+                .into_no_null_iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            // 若无日期列，使用结果长度生成索引字符串
+            (0..equity_curve.len()).map(|i| i.to_string()).collect()
+        };
+
+        // 2) 选择一个主价格列（首个非日期列）
+        let price_label = data_df
+            .get_column_names()
+            .iter()
+            .find(|c| {
+                let n = c.as_str();
+                n != "Date" && n != "date"
+            })
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "price".to_string());
+
+        let price_series: Vec<f64> = if let Ok(col) = data_df.column(&price_label) {
+            let c = if col.dtype() != &DataType::Float64 { col.cast(&DataType::Float64).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))? } else { col.clone() };
+            let ca = c.f64().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            // 使用向后插入法填充缺失
+            backfill_f64(ca.into_iter())
+        } else {
+            vec![0.0; dates.len()]
+        };
+
+        // 3) 按时间戳聚合成交量/成交额（基于成交记录）
+        let mut traded_volume = vec![0.0f64; dates.len()];
+        let mut traded_amount = vec![0.0f64; dates.len()];
+        for t in &engine.portfolio.trades {
+            let idx = t.timestamp as usize;
+            if idx < dates.len() {
+                traded_volume[idx] += t.quantity;
+                traded_amount[idx] += t.quantity * t.price;
+            }
+        }
+
         Ok(Self {
             summary,
             equity_curve,
             trades: engine.portfolio.trades.clone(),
             daily_records: engine.daily_records.clone(),
             backtest_duration_ms: duration_ms,
+            dates,
+            price_series,
+            price_label,
+            traded_volume,
+            traded_amount,
         })
     }
 
@@ -1443,5 +1509,112 @@ impl Backtrade {
         /// 获取回测耗时（毫秒）
     pub fn backtest_duration(&self) -> f64 {
         self.backtest_duration_ms
+    }
+
+    /// 可视化：
+    /// - 上图：价格曲线 + 买卖点
+    /// - 中图：总资产与回撤
+    /// - 下图：成交量与成交额
+    /// x轴统一为时间（self.dates）
+    pub fn plot(&self) -> PyResult<()> {
+        use pyo3::types::{PyDict, PyList};
+        let n = self.dates.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // 计算回撤（按权益曲线）
+        let mut drawdown: Vec<f64> = Vec::with_capacity(self.equity_curve.len());
+        let mut peak = if let Some(first) = self.equity_curve.first() { *first } else { 0.0 };
+        for &eq in &self.equity_curve {
+            if eq > peak { peak = eq; }
+            let dd = if peak > 0.0 { (eq / peak) - 1.0 } else { 0.0 };
+            drawdown.push(dd);
+        }
+
+        // 买卖点坐标
+        let mut buy_x: Vec<String> = Vec::new();
+        let mut buy_y: Vec<f64> = Vec::new();
+        let mut sell_x: Vec<String> = Vec::new();
+        let mut sell_y: Vec<f64> = Vec::new();
+        for t in &self.trades {
+            let idx = t.timestamp as usize;
+            if idx < n && idx < self.price_series.len() {
+                let x = self.dates[idx].clone();
+                let y = self.price_series[idx];
+                match t.side {
+                    Side::Buy => { buy_x.push(x); buy_y.push(y); },
+                    Side::Sell => { sell_x.push(x); sell_y.push(y); },
+                }
+            }
+        }
+
+        pyo3::Python::with_gil(|py| {
+            // 准备变量
+            let globals = PyDict::new(py);
+            let locals = PyDict::new(py);
+
+            locals.set_item("dates", PyList::new(py, &self.dates))?;
+            locals.set_item("price", PyList::new(py, &self.price_series))?;
+            locals.set_item("price_label", &self.price_label)?;
+            locals.set_item("buy_x", PyList::new(py, &buy_x))?;
+            locals.set_item("buy_y", PyList::new(py, &buy_y))?;
+            locals.set_item("sell_x", PyList::new(py, &sell_x))?;
+            locals.set_item("sell_y", PyList::new(py, &sell_y))?;
+            locals.set_item("equity", PyList::new(py, &self.equity_curve))?;
+            locals.set_item("drawdown", PyList::new(py, &drawdown))?;
+            locals.set_item("volume", PyList::new(py, &self.traded_volume))?;
+            locals.set_item("amount", PyList::new(py, &self.traded_amount))?;
+
+            let code = r#"
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
+fig = make_subplots(
+    rows=3, cols=1, shared_xaxes=True,
+    row_heights=[0.45, 0.30, 0.25],
+    vertical_spacing=0.04,
+    specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}]]
+)
+
+# Row 1: Price with trades
+fig.add_trace(go.Scatter(x=dates, y=price, name=price_label, mode="lines", line=dict(color="#1f77b4")), row=1, col=1)
+if buy_x:
+    fig.add_trace(go.Scatter(x=buy_x, y=buy_y, name="Buy", mode="markers",
+                             marker=dict(symbol="triangle-up", color="#2ca02c", size=9)), row=1, col=1)
+if sell_x:
+    fig.add_trace(go.Scatter(x=sell_x, y=sell_y, name="Sell", mode="markers",
+                             marker=dict(symbol="triangle-down", color="#d62728", size=9)), row=1, col=1)
+
+# Row 2: Equity and Drawdown (as secondary)
+fig.add_trace(go.Scatter(x=dates, y=equity, name="Equity", mode="lines", line=dict(color="#9467bd")), row=2, col=1, secondary_y=False)
+fig.add_trace(go.Scatter(x=dates, y=[d*100 for d in drawdown], name="Drawdown %", mode="lines",
+                         line=dict(color="#ff7f0e")), row=2, col=1, secondary_y=True)
+
+# Row 3: Volume and Amount (bar)
+fig.add_trace(go.Bar(x=dates, y=volume, name="Volume", marker_color="#8c564b"), row=3, col=1)
+fig.add_trace(go.Bar(x=dates, y=amount, name="Amount", marker_color="#17becf"), row=3, col=1)
+
+fig.update_layout(
+    title="Backtrade Overview",
+    barmode="overlay",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    margin=dict(l=50, r=30, t=60, b=40),
+    hovermode="x unified",
+)
+
+fig.update_yaxes(title_text=price_label, row=1, col=1)
+fig.update_yaxes(title_text="Equity", row=2, col=1, secondary_y=False)
+fig.update_yaxes(title_text="Drawdown %", row=2, col=1, secondary_y=True)
+fig.update_yaxes(title_text="Volume / Amount", row=3, col=1)
+fig.update_xaxes(title_text="Time", row=3, col=1)
+
+fig.show()
+"#;
+
+            py.run(code, Some(globals), Some(locals))
+        })?;
+
+        Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-mod qbacktest;
+mod qbacktrade;
 mod qtalib;
 
 #[pymodule]
@@ -201,7 +201,7 @@ fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ====================================================================
     
     // 添加Backtrade类
-    m.add_class::<qbacktest::Backtrade>()?;
+    m.add_class::<qbacktrade::Backtrade>()?;
     
     Ok(())
 }
