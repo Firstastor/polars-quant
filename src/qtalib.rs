@@ -13,7 +13,10 @@ pub enum MAType {
     EMA, // 指数移动平均
 }
 
-/// 通用移动平均计算函数
+/// 通用移动平均计算函数 - 手写 tight loop 优化（模拟 TA-Lib）
+/// 
+/// 使用零拷贝访问和滑动窗口增量更新，显著提升性能
+/// 所有依赖此函数的函数（DEMA, TEMA, MACD, BBANDS）都将自动受益
 pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Option<f64>> {
     let len = values.len();
     let mut result = vec![None; len];
@@ -24,25 +27,30 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
     
     match ma_type {
         MAType::SMA => {
-            let mut sum = 0.0;
+            // Tight loop 滑动窗口（模拟 TA-Lib）
+            let mut period_total = 0.0;
+            let lookback = period - 1;
             
-            // 计算第一个窗口的和
-            for i in 0..period {
-                sum += values[i];
+            // 初始化累加和（前 period-1 个值）
+            for i in 0..lookback {
+                period_total += values[i];
             }
-            result[period - 1] = Some(sum / period as f64);
             
-            // 滑动窗口计算后续值
-            for i in period..len {
-                sum += values[i] - values[i - period];
-                result[i] = Some(sum / period as f64);
+            // 滑动窗口增量更新（O(1) per step）
+            let mut trailing_idx = 0;
+            for i in lookback..len {
+                period_total += values[i];              // 加入新值
+                result[i] = Some(period_total / period as f64); // 计算平均
+                period_total -= values[trailing_idx];   // 移除旧值
+                trailing_idx += 1;
             }
         },
         MAType::EMA => {
+            // Tight loop 指数平滑（模拟 TA-Lib）
             let alpha = 2.0 / (period as f64 + 1.0);
             let one_minus_alpha = 1.0 - alpha;
             
-            // 使用SMA作为初始值
+            // 使用 SMA 作为初始值
             let mut sum = 0.0;
             for i in 0..period {
                 sum += values[i];
@@ -50,7 +58,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
             let mut ema = sum / period as f64;
             result[period - 1] = Some(ema);
             
-            // 计算EMA
+            // Tight loop: 指数平滑更新
             for i in period..len {
                 ema = alpha * values[i] + one_minus_alpha * ema;
                 result[i] = Some(ema);
@@ -116,25 +124,36 @@ fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec
         return result;
     }
     
-    // 计算真实范围
-    let mut tr_values = Vec::with_capacity(len);
-    tr_values.push(high[0] - low[0]); // 第一个值
+    // 直接在一次遍历中计算TR和累积求和,避免额外Vec分配
+    // 第一个TR值
+    let first_tr = high[0] - low[0];
+    let mut tr_sum = first_tr;
     
-    for i in 1..len {
+    // 累积前period个TR值的和
+    for i in 1..period {
         let tr1 = high[i] - low[i];
         let tr2 = (high[i] - close[i - 1]).abs();
         let tr3 = (low[i] - close[i - 1]).abs();
-        tr_values.push(tr1.max(tr2).max(tr3));
+        let tr = tr1.max(tr2).max(tr3);
+        tr_sum += tr;
     }
     
-    // 计算ATR (使用SMA开始，然后用指数平滑)
-    let sum = tr_values.iter().take(period).sum::<f64>();
-    result[period - 1] = sum / period as f64;
+    // 第一个ATR值 = SMA of TR
+    result[period - 1] = tr_sum / period as f64;
     
-    // 使用Wilder的平滑方法
+    // 使用Wilder的平滑方法: ATR = ((period-1)*prev_ATR + current_TR) / period
+    // 优化: 展开为 ATR = prev_ATR + (current_TR - prev_ATR) / period
+    let smoothing_factor = 1.0 / period as f64;
+    let retention_factor = (period - 1) as f64 / period as f64;
+    
     for i in period..len {
-        let prev_atr = result[i - 1];
-        result[i] = (prev_atr * (period - 1) as f64 + tr_values[i]) / period as f64;
+        let tr1 = high[i] - low[i];
+        let tr2 = (high[i] - close[i - 1]).abs();
+        let tr3 = (low[i] - close[i - 1]).abs();
+        let tr = tr1.max(tr2).max(tr3);
+        
+        // 使用增量更新: prev_ATR * retention + tr * smoothing
+        result[i] = result[i - 1] * retention_factor + tr * smoothing_factor;
     }
     
     result
@@ -165,7 +184,7 @@ fn is_doji_body(body_size: f64, range: f64) -> bool {
     body_size < range * 0.1
 }
 
-/// 布林带 (BBAND)
+/// 布林带 (BBAND) - 手写 tight loop 优化版本
 #[pyfunction]
 #[pyo3(signature = (series, period=20, std_dev=2.0))]
 pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySeries, PySeries, PySeries)> {
@@ -173,42 +192,107 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-    let sma_values = calculate_ma(&vec_values, period, MAType::SMA);
+    let len = values.len();
+    let mut upper_out = vec![f64::NAN; len];
+    let mut middle_out = vec![f64::NAN; len];
+    let mut lower_out = vec![f64::NAN; len];
     
-    // 计算标准差
-    let mut upper = Vec::with_capacity(vec_values.len());
-    let mut middle = Vec::with_capacity(vec_values.len());
-    let mut lower = Vec::with_capacity(vec_values.len());
+    if period == 0 || period > len {
+        let base_name = s.name();
+        return Ok((
+            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper_out)),
+            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle_out)),
+            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower_out))
+        ));
+    }
     
-    for i in 0..vec_values.len() {
-        if let Some(sma) = sma_values[i] {
-            if i + 1 >= period {
-                let slice = &vec_values[i + 1 - period..=i];
-                let variance = slice.iter()
-                    .map(|&x| (x - sma).powi(2))
-                    .sum::<f64>() / period as f64;
-                let std = variance.sqrt();
-                
-                upper.push(Some(sma + std_dev * std));
-                middle.push(Some(sma));
-                lower.push(Some(sma - std_dev * std));
-            } else {
-                upper.push(None);
-                middle.push(None);
-                lower.push(None);
-            }
-        } else {
-            upper.push(None);
-            middle.push(None);
-            lower.push(None);
+    // 零拷贝访问（快速路径）
+    if let Ok(input) = values.cont_slice() {
+        let lookback = period - 1;
+        let period_f64 = period as f64;
+        let inv_period = 1.0 / period_f64;
+        
+        // 初始化：计算第一个窗口的 sum 和 sum_sq
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for i in 0..period {
+            let val = input[i];
+            sum += val;
+            sum_sq += val * val;
+        }
+        
+        // 第一个输出
+        let sma = sum * inv_period;
+        let variance = (sum_sq * inv_period) - (sma * sma);
+        let std = variance.max(0.0).sqrt(); // 避免负数（浮点精度问题）
+        upper_out[lookback] = sma + std_dev * std;
+        middle_out[lookback] = sma;
+        lower_out[lookback] = sma - std_dev * std;
+        
+        // 滑动窗口：O(1) per step
+        for i in period..len {
+            let old_val = input[i - period];
+            let new_val = input[i];
+            
+            // 更新 sum 和 sum_sq
+            sum = sum - old_val + new_val;
+            sum_sq = sum_sq - old_val * old_val + new_val * new_val;
+            
+            // 计算 SMA 和标准差
+            let sma = sum * inv_period;
+            let variance = (sum_sq * inv_period) - (sma * sma);
+            let std = variance.max(0.0).sqrt();
+            
+            upper_out[i] = sma + std_dev * std;
+            middle_out[i] = sma;
+            lower_out[i] = sma - std_dev * std;
+        }
+    } else {
+        // Fallback: 非连续数组
+        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+        let lookback = period - 1;
+        let period_f64 = period as f64;
+        let inv_period = 1.0 / period_f64;
+        
+        // 初始化：计算第一个窗口的 sum 和 sum_sq
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for i in 0..period {
+            let val = vec_values[i];
+            sum += val;
+            sum_sq += val * val;
+        }
+        
+        // 第一个输出
+        let sma = sum * inv_period;
+        let variance = (sum_sq * inv_period) - (sma * sma);
+        let std = variance.max(0.0).sqrt();
+        upper_out[lookback] = sma + std_dev * std;
+        middle_out[lookback] = sma;
+        lower_out[lookback] = sma - std_dev * std;
+        
+        // 滑动窗口：O(1) per step
+        for i in period..len {
+            let old_val = vec_values[i - period];
+            let new_val = vec_values[i];
+            
+            sum = sum - old_val + new_val;
+            sum_sq = sum_sq - old_val * old_val + new_val * new_val;
+            
+            let sma = sum * inv_period;
+            let variance = (sum_sq * inv_period) - (sma * sma);
+            let std = variance.max(0.0).sqrt();
+            
+            upper_out[i] = sma + std_dev * std;
+            middle_out[i] = sma;
+            lower_out[i] = sma - std_dev * std;
         }
     }
     
     let base_name = s.name();
-    let upper_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper);
-    let middle_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle);
-    let lower_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower);
+    let upper_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper_out);
+    let middle_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle_out);
+    let lower_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower_out);
     
     Ok((PySeries(upper_series), PySeries(middle_series), PySeries(lower_series)))
 }
@@ -240,7 +324,7 @@ pub fn dema(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result))
 }
 
-/// 指数移动平均线 (EMA)
+/// 指数移动平均线 (EMA) - 手写 tight loop 优化（模拟 TA-Lib）
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -248,30 +332,54 @@ pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter()
-        .map(|opt| opt.unwrap_or(0.0))
-        .collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let ema_values = {
-        let mut result = vec![None; vec_values.len()];
-        if vec_values.is_empty() || period == 0 {
-            return Ok(PySeries(Series::new(s.name().clone(), result)));
+    if period == 0 || period > len {
+        return Ok(PySeries(Series::new(s.name().clone(), output)));
+    }
+    
+    // 零拷贝访问底层数组（快速路径）
+    if let Ok(input) = values.cont_slice() {
+        let alpha = 2.0 / (period + 1) as f64;
+        let one_minus_alpha = 1.0 - alpha;
+        
+        // 使用 SMA 作为初始值
+        let mut sum = 0.0;
+        for i in 0..period {
+            sum += input[i];
         }
+        let mut ema = sum / period as f64;
+        output[period - 1] = ema;
+        
+        // Tight loop: 指数平滑计算
+        for i in period..len {
+            ema = alpha * input[i] + one_minus_alpha * ema;
+            output[i] = ema;
+        }
+    } else {
+        // Fallback: 处理非连续数组
+        let vec_values: Vec<f64> = values.into_iter()
+            .map(|opt| opt.unwrap_or(0.0))
+            .collect();
         
         let alpha = 2.0 / (period + 1) as f64;
-        let mut ema = vec_values[0];
-        result[0] = Some(ema);
+        let one_minus_alpha = 1.0 - alpha;
         
-        for i in 1..vec_values.len() {
-            ema = alpha * vec_values[i] + (1.0 - alpha) * ema;
-            result[i] = Some(ema);
+        let mut sum = 0.0;
+        for i in 0..period {
+            sum += vec_values[i];
         }
+        let mut ema = sum / period as f64;
+        output[period - 1] = ema;
         
-        result
-    };
+        for i in period..len {
+            ema = alpha * vec_values[i] + one_minus_alpha * ema;
+            output[i] = ema;
+        }
+    }
     
-    let result = Series::new(s.name().clone(), ema_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(s.name().clone(), output)))
 }
 
 /// 考夫曼自适应移动平均 (KAMA)
@@ -282,45 +390,93 @@ pub fn kama(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut result = vec![None; len];
     
-    let kama_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        if vec_values.len() >= period {
-            for i in period..vec_values.len() {
-                // 计算变化 (Change)
-                let change = (vec_values[i] - vec_values[i - period]).abs();
-                
-                // 计算波动 (Volatility)
-                let mut volatility = 0.0;
-                for j in (i - period + 1)..=i {
-                    volatility += (vec_values[j] - vec_values[j - 1]).abs();
-                }
-                
-                // 计算效率比 (Efficiency Ratio)
-                let er = if volatility != 0.0 { change / volatility } else { 0.0 };
-                
-                // 计算平滑常数 (Smoothing Constant)
-                let fastest_sc = 2.0 / 3.0; // 对应周期2的EMA
-                let slowest_sc = 2.0 / 31.0; // 对应周期30的EMA
-                let sc = (er * (fastest_sc - slowest_sc) + slowest_sc).powi(2);
-                
-                // 计算KAMA
-                if i == period {
-                    result[i] = Some(vec_values[i]);
-                } else {
-                    let prev_kama = result[i - 1].unwrap_or(vec_values[i]);
-                    result[i] = Some(prev_kama + sc * (vec_values[i] - prev_kama));
-                }
-            }
+    if len < period + 1 {
+        let result_series = Series::new(s.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // Zero-copy optimization
+    if let Ok(arr) = values.cont_slice() {
+        // Pre-compute all price differences (avoid repeated calculation)
+        let mut diffs = vec![0.0; len];
+        for i in 1..len {
+            diffs[i] = (arr[i] - arr[i - 1]).abs();
         }
         
-        result
-    };
+        // Initialize first volatility window
+        let mut volatility = 0.0;
+        for i in 1..=period {
+            volatility += diffs[i];
+        }
+        
+        // First KAMA value
+        let change = (arr[period] - arr[0]).abs();
+        let er = if volatility != 0.0 { change / volatility } else { 0.0 };
+        
+        const FASTEST_SC: f64 = 2.0 / 3.0;   // EMA period 2
+        const SLOWEST_SC: f64 = 2.0 / 31.0;  // EMA period 30
+        const SC_RANGE: f64 = FASTEST_SC - SLOWEST_SC;
+        
+        let _sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
+        let mut kama = arr[period];
+        result[period] = Some(kama);
+        
+        // Sliding window for volatility
+        for i in (period + 1)..len {
+            // Update volatility: subtract oldest, add newest
+            volatility = volatility - diffs[i - period] + diffs[i];
+            
+            // Calculate ER with new volatility
+            let change = (arr[i] - arr[i - period]).abs();
+            let er = if volatility != 0.0 { change / volatility } else { 0.0 };
+            
+            // Calculate SC and update KAMA
+            let sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
+            kama = kama + sc * (arr[i] - kama);
+            result[i] = Some(kama);
+        }
+    } else {
+        // Fallback
+        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+        
+        let mut diffs = vec![0.0; len];
+        for i in 1..len {
+            diffs[i] = (vec_values[i] - vec_values[i - 1]).abs();
+        }
+        
+        let mut volatility = 0.0;
+        for i in 1..=period {
+            volatility += diffs[i];
+        }
+        
+        let change = (vec_values[period] - vec_values[0]).abs();
+        let er = if volatility != 0.0 { change / volatility } else { 0.0 };
+        
+        const FASTEST_SC: f64 = 2.0 / 3.0;
+        const SLOWEST_SC: f64 = 2.0 / 31.0;
+        const SC_RANGE: f64 = FASTEST_SC - SLOWEST_SC;
+        
+        let _sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
+        let mut kama = vec_values[period];
+        result[period] = Some(kama);
+        
+        for i in (period + 1)..len {
+            volatility = volatility - diffs[i - period] + diffs[i];
+            
+            let change = (vec_values[i] - vec_values[i - period]).abs();
+            let er = if volatility != 0.0 { change / volatility } else { 0.0 };
+            
+            let sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
+            kama = kama + sc * (vec_values[i] - kama);
+            result[i] = Some(kama);
+        }
+    }
     
-    let result = Series::new(s.name().clone(), kama_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(s.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 移动平均线 (MA)
@@ -505,7 +661,7 @@ pub fn mavp(series: PySeries, periods: PySeries, min_period: usize, max_period: 
     Ok(PySeries(result))
 }
 
-/// 简单移动平均线 (SMA)
+/// 简单移动平均线 (SMA) - 手写滑动窗口优化（模拟 TA-Lib tight loop）
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn sma(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -513,26 +669,56 @@ pub fn sma(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter()
-        .map(|opt| opt.unwrap_or(0.0))
-        .collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let sma_values = {
-        let mut result = vec![None; vec_values.len()];
-        if vec_values.len() < period || period == 0 {
-            return Ok(PySeries(Series::new(s.name().clone(), result)));
+    if period == 0 || period > len {
+        return Ok(PySeries(Series::new(s.name().clone(), output)));
+    }
+    
+    // 尝试零拷贝访问连续数组（最快路径）
+    if let Ok(input) = values.cont_slice() {
+        // 初始化累加和（模拟 TA-Lib: 累加前 period-1 个值）
+        let mut period_total = 0.0;
+        let lookback = period - 1;
+        let inv_period = 1.0 / period as f64; // 预计算倒数，避免重复除法
+        
+        for i in 0..lookback {
+            period_total += input[i];
         }
         
-        for i in (period - 1)..vec_values.len() {
-            let sum: f64 = vec_values[i - period + 1..=i].iter().sum();
-            result[i] = Some(sum / period as f64);
+        // Tight loop: 滑动窗口增量计算（O(1) per step）
+        let mut trailing_idx = 0;
+        for i in lookback..len {
+            period_total += input[i];              // 加入新值
+            output[i] = period_total * inv_period; // 乘法比除法快
+            period_total -= input[trailing_idx];   // 移除旧值
+            trailing_idx += 1;
+        }
+    } else {
+        // Fallback: 处理非连续数组（带 null 检查）
+        let vec_values: Vec<f64> = values.into_iter()
+            .map(|opt| opt.unwrap_or(0.0))
+            .collect();
+        
+        let mut period_total = 0.0;
+        let lookback = period - 1;
+        let inv_period = 1.0 / period as f64;
+        
+        for i in 0..lookback {
+            period_total += vec_values[i];
         }
         
-        result
-    };
+        let mut trailing_idx = 0;
+        for i in lookback..len {
+            period_total += vec_values[i];
+            output[i] = period_total * inv_period;
+            period_total -= vec_values[trailing_idx];
+            trailing_idx += 1;
+        }
+    }
     
-    let result = Series::new(s.name().clone(), sma_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(s.name().clone(), output)))
 }
 
 /// T3移动平均 (T3)
@@ -623,7 +809,9 @@ pub fn tema(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result))
 }
 
-/// 三角移动平均 (TRIMA)
+/// 三角移动平均 (TRIMA) - TA-Lib优化算法
+/// TRIMA(period=4) = (1*a + 2*b + 2*c + 1*d) / 6
+/// 使用滑动窗口避免双重SMA调用
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -631,21 +819,80 @@ pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let trima_values = {
+    if len < period {
+        let result = Series::new(s.name().clone(), output);
+        return Ok(PySeries(result));
+    }
+    
+    if let Ok(input) = values.cont_slice() {
+        let lookback = period - 1;
+        
+        // TA-Lib weighted calculation
+        // Odd period: weights = 1,2,3,...,n,...,3,2,1
+        // Even period: weights = 1,2,3,...,n,n,...,3,2,1
+        let (factor, divisor) = if period % 2 == 1 {
+            let f = (period + 1) / 2;
+            (f, (f * f) as f64)
+        } else {
+            let f = period / 2 + 1;
+            (f, (f * (f - 1)) as f64)
+        };
+        
+        // Initialize first TRIMA with weighted sum
+        let mut numerator = 0.0;
+        for i in 0..period {
+            let weight = if i < factor {
+                (i + 1) as f64
+            } else {
+                (period - i) as f64
+            };
+            numerator += input[i] * weight;
+        }
+        
+        output[lookback] = numerator / divisor;
+        
+        // Slide window: TA-Lib uses 4 adjustments per iteration
+        let mut trailing_idx = 0usize;
+        let middle_idx = (period - 1) / 2;
+        
+        for today_idx in (lookback + 1)..len {
+            let numerator_sub = input[trailing_idx];
+            trailing_idx += 1;
+            let numerator_add = input[today_idx];
+            
+            // Core sliding window logic
+            numerator += numerator_add - numerator_sub;
+            
+            // Extra adjustment for triangular weighting
+            numerator -= input[trailing_idx + middle_idx];
+            if period % 2 == 0 {
+                numerator += input[trailing_idx + middle_idx - 1];
+            } else {
+                numerator += input[trailing_idx + middle_idx];
+            }
+            
+            output[today_idx] = numerator / divisor;
+        }
+    } else {
+        // Fallback
+        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
         let sma1_values = calculate_ma(&vec_values, period, MAType::SMA);
         let sma1_f64: Vec<f64> = sma1_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
         let sma2_period = if period % 2 == 1 { (period + 1) / 2 } else { period / 2 + 1 };
         let sma2_values = calculate_ma(&sma1_f64, sma2_period, MAType::SMA);
-        sma2_values
-    };
+        for (i, val) in sma2_values.iter().enumerate() {
+            output[i] = val.unwrap_or(f64::NAN);
+        }
+    }
     
-    let result = Series::new(s.name().clone(), trima_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
-/// 加权移动平均 (WMA)
+/// 加权移动平均 (WMA) - 使用优化的滑动窗口算法
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -653,26 +900,55 @@ pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let wma_values = {
-        let mut result = vec![None; vec_values.len()];
-        let weight_sum: usize = (1..=period).sum();
-        
-        for i in 0..vec_values.len() {
-            if i + 1 >= period {
-                let mut weighted_sum = 0.0;
-                for (j, weight) in (1..=period).enumerate() {
-                    weighted_sum += vec_values[i - period + 1 + j] * weight as f64;
-                }
-                result[i] = Some(weighted_sum / weight_sum as f64);
-            }
+    if len < period {
+        let result = Series::new(s.name().clone(), output);
+        return Ok(PySeries(result));
+    }
+    
+    let weight_sum = (period * (period + 1) / 2) as f64;
+    let inv_weight_sum = 1.0 / weight_sum;
+    let period_f64 = period as f64;
+    
+    // 零拷贝 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        // 第一个窗口
+        let mut weighted_sum = 0.0;
+        for j in 0..period {
+            weighted_sum += input[j] * (j + 1) as f64;
         }
+        output[period - 1] = weighted_sum * inv_weight_sum;
         
-        result
-    };
+        // 滑动窗口：每次移动更新加权和
+        let mut sum_values: f64 = input[..period].iter().sum();
+        
+        for i in period..len {
+            weighted_sum = weighted_sum - sum_values + input[i] * period_f64;
+            sum_values = sum_values - input[i - period] + input[i];
+            output[i] = weighted_sum * inv_weight_sum;
+        }
+    } else {
+        // fallback
+        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+        
+        let mut weighted_sum = 0.0;
+        for j in 0..period {
+            weighted_sum += vec_values[j] * (j + 1) as f64;
+        }
+        output[period - 1] = weighted_sum * inv_weight_sum;
+        
+        let mut sum_values = vec_values[..period].iter().sum::<f64>();
+        
+        for i in period..len {
+            weighted_sum = weighted_sum - sum_values + vec_values[i] * period_f64;
+            sum_values = sum_values - vec_values[i - period] + vec_values[i];
+            output[i] = weighted_sum * inv_weight_sum;
+        }
+    }
     
-    let result = Series::new(s.name().clone(), wma_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -684,25 +960,78 @@ pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut result = vec![f64::NAN; len];
     
-    let midpoint_values = {
-        let mut result = vec![None; vec_values.len()];
+    if period == 0 || period > len {
+        let result_series = Series::new(s.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    let inv_2 = 0.5;  // 预计算 1/2
+    
+    // 优化: 使用零拷贝访问
+    if let Ok(arr) = values.cont_slice() {
+        // 滑动窗口优化: 只在窗口滑动时更新max/min
+        let window = &arr[0..period];
+        let mut max_val = window[0];
+        let mut min_val = window[0];
         
-        for i in 0..vec_values.len() {
-            if i + 1 >= period {
-                let slice = &vec_values[i + 1 - period..=i];
-                let max_val = slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let min_val = slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                result[i] = Some((max_val + min_val) / 2.0);
-            }
+        // 初始化第一个窗口的max/min
+        for &v in &window[1..] {
+            if v > max_val { max_val = v; }
+            if v < min_val { min_val = v; }
         }
+        result[period - 1] = (max_val + min_val) * inv_2;
         
-        result
-    };
+        // 滑动窗口: 检查是否需要更新max/min
+        for i in period..len {
+            let new_val = arr[i];
+            let old_val = arr[i - period];
+            
+            // 如果新值可能改变max/min,更新它们
+            if new_val > max_val || old_val == max_val {
+                // 需要重新扫描窗口
+                max_val = arr[i - period + 1];
+                for j in (i - period + 2)..=i {
+                    if arr[j] > max_val { max_val = arr[j]; }
+                }
+            } else if new_val > max_val {
+                max_val = new_val;
+            }
+            
+            if new_val < min_val || old_val == min_val {
+                // 需要重新扫描窗口
+                min_val = arr[i - period + 1];
+                for j in (i - period + 2)..=i {
+                    if arr[j] < min_val { min_val = arr[j]; }
+                }
+            } else if new_val < min_val {
+                min_val = new_val;
+            }
+            
+            result[i] = (max_val + min_val) * inv_2;
+        }
+    } else {
+        // 后备路径: 使用Vec
+        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+        
+        for i in (period - 1)..len {
+            let start = i + 1 - period;
+            let mut max_val = vec_values[start];
+            let mut min_val = vec_values[start];
+            
+            for j in (start + 1)..=i {
+                if vec_values[j] > max_val { max_val = vec_values[j]; }
+                if vec_values[j] < min_val { min_val = vec_values[j]; }
+            }
+            
+            result[i] = (max_val + min_val) * inv_2;
+        }
+    }
     
-    let result = Series::new(s.name().clone(), midpoint_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(s.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 中间价格 (MIDPRICE) - 针对high/low序列
@@ -712,29 +1041,54 @@ pub fn midprice_hl(high: PySeries, low: PySeries, period: usize) -> PyResult<PyS
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
     
-    let midprice_values = {
-        let mut result = vec![None; high_vals.len()];
-        
-        for i in 0..high_vals.len() {
-            if i + 1 >= period {
-                let high_slice = &high_vals[i + 1 - period..=i];
-                let low_slice = &low_vals[i + 1 - period..=i];
-                
-                let max_high = high_slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let min_low = low_slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                
-                result[i] = Some((max_high + min_low) / 2.0);
+    let len = high_vals.len();
+    let mut result = vec![f64::NAN; len];
+    
+    if period == 0 || period > len {
+        let result_series = Series::new(h.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 优化: 使用零拷贝访问
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // 零拷贝路径: 直接在窗口中搜索最高价和最低价
+        for i in (period - 1)..len {
+            let start = i + 1 - period;
+            let mut max_high = h_arr[start];
+            let mut min_low = l_arr[start];
+            
+            // 紧密循环查找窗口内的最高价和最低价
+            for j in (start + 1)..=i {
+                if h_arr[j] > max_high { max_high = h_arr[j]; }
+                if l_arr[j] < min_low { min_low = l_arr[j]; }
             }
+            
+            result[i] = (max_high + min_low) / 2.0;
         }
+    } else {
+        // 后备路径: 使用Vec
+        let high_vals_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vals_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        for i in (period - 1)..len {
+            let start = i + 1 - period;
+            let mut max_high = high_vals_vec[start];
+            let mut min_low = low_vals_vec[start];
+            
+            for j in (start + 1)..=i {
+                if high_vals_vec[j] > max_high { max_high = high_vals_vec[j]; }
+                if low_vals_vec[j] < min_low { min_low = low_vals_vec[j]; }
+            }
+            
+            result[i] = (max_high + min_low) / 2.0;
+        }
+    }
     
-    let result = Series::new(h.name().clone(), midprice_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(h.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 抛物线SAR (SAR)
@@ -744,63 +1098,109 @@ pub fn sar(high: PySeries, low: PySeries, acceleration: f64, maximum: f64) -> Py
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let len = high_vals.len();
     
-    let sar_values = {
-        let mut result = vec![None; high_vals.len()];
+    let mut sar_values = vec![None; len];
+    
+    if len < 2 {
+        let result = Series::new(h.name().clone(), sar_values);
+        return Ok(PySeries(result));
+    }
+    
+    // 零拷贝路径
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // 初始化SAR参数
+        let mut sar = l_arr[0];
+        let mut ep = h_arr[0]; // 极值点
+        let mut af = acceleration; // 加速因子
+        let mut is_bull = true; // 是否为上升趋势
         
-        if high_vals.len() >= 2 {
-            // 初始化SAR参数
-            let mut sar = low_vals[0];
-            let mut ep = high_vals[0]; // 极值点
-            let mut af = acceleration; // 加速因子
-            let mut is_bull = true; // 是否为上升趋势
+        sar_values[0] = Some(sar);
+        
+        for i in 1..len {
+            // 更新SAR
+            sar = sar + af * (ep - sar);
             
-            result[0] = Some(sar);
-            
-            for i in 1..high_vals.len() {
-                // 更新SAR
-                sar = sar + af * (ep - sar);
-                
-                if is_bull {
-                    // 上升趋势
-                    if low_vals[i] <= sar {
-                        // 趋势反转
-                        is_bull = false;
-                        sar = ep;
-                        ep = low_vals[i];
-                        af = acceleration;
-                    } else {
-                        // 继续上升趋势
-                        if high_vals[i] > ep {
-                            ep = high_vals[i];
-                            af = (af + acceleration).min(maximum);
-                        }
-                    }
+            if is_bull {
+                // 上升趋势
+                if l_arr[i] <= sar {
+                    // 趋势反转
+                    is_bull = false;
+                    sar = ep;
+                    ep = l_arr[i];
+                    af = acceleration;
                 } else {
-                    // 下降趋势
-                    if high_vals[i] >= sar {
-                        // 趋势反转
-                        is_bull = true;
-                        sar = ep;
-                        ep = high_vals[i];
-                        af = acceleration;
-                    } else {
-                        // 继续下降趋势
-                        if low_vals[i] < ep {
-                            ep = low_vals[i];
-                            af = (af + acceleration).min(maximum);
-                        }
+                    // 继续上升趋势
+                    if h_arr[i] > ep {
+                        ep = h_arr[i];
+                        af = (af + acceleration).min(maximum);
                     }
                 }
-                
-                result[i] = Some(sar);
+            } else {
+                // 下降趋势
+                if h_arr[i] >= sar {
+                    // 趋势反转
+                    is_bull = true;
+                    sar = ep;
+                    ep = h_arr[i];
+                    af = acceleration;
+                } else {
+                    // 继续下降趋势
+                    if l_arr[i] < ep {
+                        ep = l_arr[i];
+                        af = (af + acceleration).min(maximum);
+                    }
+                }
             }
+            
+            sar_values[i] = Some(sar);
         }
+    } else {
+        // Fallback
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        let mut sar = low_vec[0];
+        let mut ep = high_vec[0];
+        let mut af = acceleration;
+        let mut is_bull = true;
+        
+        sar_values[0] = Some(sar);
+        
+        for i in 1..len {
+            sar = sar + af * (ep - sar);
+            
+            if is_bull {
+                if low_vec[i] <= sar {
+                    is_bull = false;
+                    sar = ep;
+                    ep = low_vec[i];
+                    af = acceleration;
+                } else {
+                    if high_vec[i] > ep {
+                        ep = high_vec[i];
+                        af = (af + acceleration).min(maximum);
+                    }
+                }
+            } else {
+                if high_vec[i] >= sar {
+                    is_bull = true;
+                    sar = ep;
+                    ep = high_vec[i];
+                    af = acceleration;
+                } else {
+                    if low_vec[i] < ep {
+                        ep = low_vec[i];
+                        af = (af + acceleration).min(maximum);
+                    }
+                }
+            }
+            
+            sar_values[i] = Some(sar);
+        }
+    }
     
     let result = Series::new(h.name().clone(), sar_values);
     Ok(PySeries(result))
@@ -824,8 +1224,9 @@ pub fn sarext(
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let len = high_vals.len();
     
     // 设置默认参数
     let start_value = startvalue.unwrap_or(0.0);
@@ -837,77 +1238,137 @@ pub fn sarext(
     let accel_short = accelerationshort.unwrap_or(0.02);
     let accel_max_short = accelerationmaxshort.unwrap_or(0.2);
     
-    let sar_values = {
-        let mut result = vec![None; high_vals.len()];
+    let mut sar_values = vec![None; len];
+    
+    if len < 2 {
+        let result = Series::new(h.name().clone(), sar_values);
+        return Ok(PySeries(result));
+    }
+    
+    // 零拷贝路径
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // 初始化SAR参数
+        let initial_sar = if start_value == 0.0 {
+            l_arr[0]
+        } else {
+            start_value
+        };
+        let mut sar = initial_sar;
+        let mut ep = h_arr[0]; // 极值点
+        let mut af = accel_init_long; // 加速因子
+        let mut is_bull = true; // 是否为上升趋势
         
-        if high_vals.len() >= 2 {
-            // 初始化SAR参数
-            let initial_sar = if start_value == 0.0 {
-                low_vals[0]
-            } else {
-                start_value
-            };
-            let mut sar = initial_sar;
-            let mut ep = high_vals[0]; // 极值点
-            let mut af = accel_init_long; // 加速因子
-            let mut is_bull = true; // 是否为上升趋势
+        sar_values[0] = Some(sar);
+        
+        for i in 1..len {
+            // 计算新的SAR
+            sar = sar + af * (ep - sar);
             
-            result[0] = Some(sar);
-            
-            for i in 1..high_vals.len() {
-                // 计算新的SAR
-                sar = sar + af * (ep - sar);
-                
-                if is_bull {
-                    // 上升趋势 (多头)
-                    if low_vals[i] <= sar {
-                        // 趋势反转到下降
-                        is_bull = false;
-                        sar = ep + offset_on_reverse;
-                        ep = low_vals[i];
-                        af = accel_init_short;
-                    } else {
-                        // 继续上升趋势
-                        if high_vals[i] > ep {
-                            ep = high_vals[i];
-                            af = (af + accel_long).min(accel_max_long);
-                        }
-                        // 确保SAR不超过前两个周期的低点
-                        if i >= 2 {
-                            sar = sar.min(low_vals[i-1]).min(low_vals[i-2]);
-                        } else if i >= 1 {
-                            sar = sar.min(low_vals[i-1]);
-                        }
-                    }
+            if is_bull {
+                // 上升趋势 (多头)
+                if l_arr[i] <= sar {
+                    // 趋势反转到下降
+                    is_bull = false;
+                    sar = ep + offset_on_reverse;
+                    ep = l_arr[i];
+                    af = accel_init_short;
                 } else {
-                    // 下降趋势 (空头)
-                    if high_vals[i] >= sar {
-                        // 趋势反转到上升
-                        is_bull = true;
-                        sar = ep - offset_on_reverse;
-                        ep = high_vals[i];
-                        af = accel_init_long;
-                    } else {
-                        // 继续下降趋势
-                        if low_vals[i] < ep {
-                            ep = low_vals[i];
-                            af = (af + accel_short).min(accel_max_short);
-                        }
-                        // 确保SAR不低于前两个周期的高点
-                        if i >= 2 {
-                            sar = sar.max(high_vals[i-1]).max(high_vals[i-2]);
-                        } else if i >= 1 {
-                            sar = sar.max(high_vals[i-1]);
-                        }
+                    // 继续上升趋势
+                    if h_arr[i] > ep {
+                        ep = h_arr[i];
+                        af = (af + accel_long).min(accel_max_long);
+                    }
+                    // 确保SAR不超过前两个周期的低点
+                    if i >= 2 {
+                        sar = sar.min(l_arr[i-1]).min(l_arr[i-2]);
+                    } else if i >= 1 {
+                        sar = sar.min(l_arr[i-1]);
                     }
                 }
-                
-                result[i] = Some(sar);
+            } else {
+                // 下降趋势 (空头)
+                if h_arr[i] >= sar {
+                    // 趋势反转到上升
+                    is_bull = true;
+                    sar = ep - offset_on_reverse;
+                    ep = h_arr[i];
+                    af = accel_init_long;
+                } else {
+                    // 继续下降趋势
+                    if l_arr[i] < ep {
+                        ep = l_arr[i];
+                        af = (af + accel_short).min(accel_max_short);
+                    }
+                    // 确保SAR不低于前两个周期的高点
+                    if i >= 2 {
+                        sar = sar.max(h_arr[i-1]).max(h_arr[i-2]);
+                    } else if i >= 1 {
+                        sar = sar.max(h_arr[i-1]);
+                    }
+                }
             }
+            
+            sar_values[i] = Some(sar);
         }
+    } else {
+        // Fallback
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        let initial_sar = if start_value == 0.0 {
+            low_vec[0]
+        } else {
+            start_value
+        };
+        let mut sar = initial_sar;
+        let mut ep = high_vec[0];
+        let mut af = accel_init_long;
+        let mut is_bull = true;
+        
+        sar_values[0] = Some(sar);
+        
+        for i in 1..len {
+            sar = sar + af * (ep - sar);
+            
+            if is_bull {
+                if low_vec[i] <= sar {
+                    is_bull = false;
+                    sar = ep + offset_on_reverse;
+                    ep = low_vec[i];
+                    af = accel_init_short;
+                } else {
+                    if high_vec[i] > ep {
+                        ep = high_vec[i];
+                        af = (af + accel_long).min(accel_max_long);
+                    }
+                    if i >= 2 {
+                        sar = sar.min(low_vec[i-1]).min(low_vec[i-2]);
+                    } else if i >= 1 {
+                        sar = sar.min(low_vec[i-1]);
+                    }
+                }
+            } else {
+                if high_vec[i] >= sar {
+                    is_bull = true;
+                    sar = ep - offset_on_reverse;
+                    ep = high_vec[i];
+                    af = accel_init_long;
+                } else {
+                    if low_vec[i] < ep {
+                        ep = low_vec[i];
+                        af = (af + accel_short).min(accel_max_short);
+                    }
+                    if i >= 2 {
+                        sar = sar.max(high_vec[i-1]).max(high_vec[i-2]);
+                    } else if i >= 1 {
+                        sar = sar.max(high_vec[i-1]);
+                    }
+                }
+            }
+            
+            sar_values[i] = Some(sar);
+        }
+    }
     
     let result = Series::new(h.name().clone(), sar_values);
     Ok(PySeries(result))
@@ -925,94 +1386,140 @@ pub fn adx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let adx_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period * 2 || period == 0 {
+        return Ok(PySeries(Series::new(c.name().clone(), result)));
+    }
+    
+    // 零拷贝路径
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
-        if close_vals.len() >= period * 2 {
-            // 计算TR, +DM, -DM
-            let mut tr_values = Vec::new();
-            let mut plus_dm = Vec::new();
-            let mut minus_dm = Vec::new();
+        // 预计算所有TR, +DM, -DM
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            let hl = h_arr[i] - l_arr[i];
+            let hc = (h_arr[i] - c_arr[i - 1]).abs();
+            let lc = (l_arr[i] - c_arr[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
             
-            for i in 1..close_vals.len() {
-                // 计算真实波幅 (True Range)
-                let hl = high_vals[i] - low_vals[i];
-                let hc = (high_vals[i] - close_vals[i - 1]).abs();
-                let lc = (low_vals[i] - close_vals[i - 1]).abs();
-                let tr = hl.max(hc).max(lc);
-                tr_values.push(tr);
-                
-                // 计算方向移动 (Directional Movement)
-                let high_diff = high_vals[i] - high_vals[i - 1];
-                let low_diff = low_vals[i - 1] - low_vals[i];
-                
-                let plus_dm_val = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
-                let minus_dm_val = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
-                
-                plus_dm.push(plus_dm_val);
-                minus_dm.push(minus_dm_val);
+            let high_diff = h_arr[i] - h_arr[i - 1];
+            let low_diff = l_arr[i - 1] - l_arr[i];
+            
+            if high_diff > low_diff && high_diff > 0.0 {
+                plus_dm[i] = high_diff;
             }
+            if low_diff > high_diff && low_diff > 0.0 {
+                minus_dm[i] = low_diff;
+            }
+        }
+        
+        // 初始求和
+        let mut smooth_tr: f64 = tr[1..=period].iter().sum();
+        let mut smooth_plus_dm: f64 = plus_dm[1..=period].iter().sum();
+        let mut smooth_minus_dm: f64 = minus_dm[1..=period].iter().sum();
+        
+        let inv_period = 1.0 / period as f64;
+        
+        // 预分配DX数组
+        let mut dx = vec![0.0; len];
+        
+        // Wilder平滑 + 计算DI和DX
+        for i in (period + 1)..len {
+            smooth_tr = smooth_tr - smooth_tr * inv_period + tr[i];
+            smooth_plus_dm = smooth_plus_dm - smooth_plus_dm * inv_period + plus_dm[i];
+            smooth_minus_dm = smooth_minus_dm - smooth_minus_dm * inv_period + minus_dm[i];
             
-            // 计算平滑的TR, +DM, -DM
-            if tr_values.len() >= period {
-                // 计算初始平均值
-                let mut smooth_tr: f64 = tr_values[0..period].iter().sum::<f64>();
-                let mut smooth_plus_dm: f64 = plus_dm[0..period].iter().sum::<f64>();
-                let mut smooth_minus_dm: f64 = minus_dm[0..period].iter().sum::<f64>();
+            if smooth_tr > 0.0 {
+                let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+                let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+                let sum_di = plus_di + minus_di;
                 
-                // 计算+DI和-DI
-                let mut plus_di_vals = Vec::new();
-                let mut minus_di_vals = Vec::new();
-                
-                for i in period..tr_values.len() {
-                    // Wilder's平滑
-                    smooth_tr = smooth_tr - (smooth_tr / period as f64) + tr_values[i];
-                    smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm / period as f64) + plus_dm[i];
-                    smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm / period as f64) + minus_dm[i];
-                    
-                    let plus_di = if smooth_tr > 0.0 { 100.0 * smooth_plus_dm / smooth_tr } else { 0.0 };
-                    let minus_di = if smooth_tr > 0.0 { 100.0 * smooth_minus_dm / smooth_tr } else { 0.0 };
-                    
-                    plus_di_vals.push(plus_di);
-                    minus_di_vals.push(minus_di);
-                }
-                
-                // 计算DX
-                let mut dx_vals = Vec::new();
-                for i in 0..plus_di_vals.len() {
-                    let sum_di = plus_di_vals[i] + minus_di_vals[i];
-                    let dx = if sum_di > 0.0 {
-                        100.0 * (plus_di_vals[i] - minus_di_vals[i]).abs() / sum_di
-                    } else {
-                        0.0
-                    };
-                    dx_vals.push(dx);
-                }
-                
-                // 计算ADX（DX的平滑移动平均）
-                if dx_vals.len() >= period {
-                    let mut adx: f64 = dx_vals[0..period].iter().sum::<f64>() / period as f64;
-                    result[period * 2] = Some(adx);
-                    
-                    for i in 1..(dx_vals.len() - period + 1) {
-                        adx = (adx * (period - 1) as f64 + dx_vals[period - 1 + i]) / period as f64;
-                        if period * 2 + i < result.len() {
-                            result[period * 2 + i] = Some(adx);
-                        }
-                    }
+                if sum_di > 0.0 {
+                    dx[i] = 100.0 * (plus_di - minus_di).abs() / sum_di;
                 }
             }
         }
         
-        result
-    };
+        // ADX: DX的Wilder平滑
+        let start_idx = period * 2;
+        let mut adx: f64 = dx[(period + 1)..=start_idx].iter().sum::<f64>() / period as f64;
+        result[start_idx] = Some(adx);
+        
+        for i in (start_idx + 1)..len {
+            adx = adx - adx * inv_period + dx[i];
+            result[i] = Some(adx);
+        }
+    } else {
+        // Fallback
+        let h_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let l_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let c_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            let hl = h_vec[i] - l_vec[i];
+            let hc = (h_vec[i] - c_vec[i - 1]).abs();
+            let lc = (l_vec[i] - c_vec[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
+            
+            let high_diff = h_vec[i] - h_vec[i - 1];
+            let low_diff = l_vec[i - 1] - l_vec[i];
+            
+            if high_diff > low_diff && high_diff > 0.0 {
+                plus_dm[i] = high_diff;
+            }
+            if low_diff > high_diff && low_diff > 0.0 {
+                minus_dm[i] = low_diff;
+            }
+        }
+        
+        let mut smooth_tr: f64 = tr[1..=period].iter().sum();
+        let mut smooth_plus_dm: f64 = plus_dm[1..=period].iter().sum();
+        let mut smooth_minus_dm: f64 = minus_dm[1..=period].iter().sum();
+        
+        let inv_period = 1.0 / period as f64;
+        let mut dx = vec![0.0; len];
+        
+        for i in (period + 1)..len {
+            smooth_tr = smooth_tr - smooth_tr * inv_period + tr[i];
+            smooth_plus_dm = smooth_plus_dm - smooth_plus_dm * inv_period + plus_dm[i];
+            smooth_minus_dm = smooth_minus_dm - smooth_minus_dm * inv_period + minus_dm[i];
+            
+            if smooth_tr > 0.0 {
+                let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+                let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+                let sum_di = plus_di + minus_di;
+                
+                if sum_di > 0.0 {
+                    dx[i] = 100.0 * (plus_di - minus_di).abs() / sum_di;
+                }
+            }
+        }
+        
+        let start_idx = period * 2;
+        let mut adx: f64 = dx[(period + 1)..=start_idx].iter().sum::<f64>() / period as f64;
+        result[start_idx] = Some(adx);
+        
+        for i in (start_idx + 1)..len {
+            adx = adx - adx * inv_period + dx[i];
+            result[i] = Some(adx);
+        }
+    }
     
-    let result = Series::new(c.name().clone(), adx_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 /// 平均趋向指标评级 (ADXR)
@@ -1023,29 +1530,45 @@ pub fn adxr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
     let l: Series = low.into();
     let c: Series = close.into();
     
-    // 先计算ADX值
-    let adx_result = adx(PySeries(h.clone()), PySeries(l.clone()), PySeries(c.clone()), period)?;
-    let adx_series: Series = adx_result.into();
-    let adx_vals: Vec<f64> = adx_series.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    // 保存 name 后再 move (避免不必要的 clone)
+    let name = c.name().clone();
     
-    let adxr_values = {
-        let mut result = vec![None; adx_vals.len()];
-        
+    // 先计算ADX值
+    let adx_result = adx(PySeries(h), PySeries(l), PySeries(c), period)?;
+    let adx_series: Series = adx_result.into();
+    let adx_vals = adx_series.f64().unwrap();
+    let len = adx_vals.len();
+    
+    let mut adxr_values = vec![None; len];
+    
+    // 零拷贝路径
+    if let Ok(adx_arr) = adx_vals.cont_slice() {
         // ADXR = (当前ADX + period周期前的ADX) / 2
-        for i in period..(adx_vals.len()) {
+        for i in period..len {
             if i >= period * 3 { // 确保有足够的ADX数据
-                let current_adx = adx_vals[i];
-                let past_adx = adx_vals[i - period];
+                let current_adx = adx_arr[i];
+                let past_adx = adx_arr[i - period];
                 if current_adx > 0.0 && past_adx > 0.0 {
-                    result[i] = Some((current_adx + past_adx) / 2.0);
+                    adxr_values[i] = Some((current_adx + past_adx) * 0.5);
                 }
             }
         }
+    } else {
+        // Fallback
+        let adx_vec: Vec<f64> = adx_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        for i in period..len {
+            if i >= period * 3 {
+                let current_adx = adx_vec[i];
+                let past_adx = adx_vec[i - period];
+                if current_adx > 0.0 && past_adx > 0.0 {
+                    adxr_values[i] = Some((current_adx + past_adx) * 0.5);
+                }
+            }
+        }
+    }
     
-    let result = Series::new(c.name().clone(), adxr_values);
+    let result = Series::new(name, adxr_values);
     Ok(PySeries(result))
 }
 
@@ -1075,88 +1598,287 @@ pub fn apo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult
     Ok(PySeries(result))
 }
 
-/// 阿隆指标 (AROON)
+/// 阿隆指标 (AROON) - 优化：零拷贝 + tight loop 位置查找
 #[pyfunction]
 #[pyo3(signature = (high, low, period=14))]
 pub fn aroon(high: PySeries, low: PySeries, period: usize) -> PyResult<(PySeries, PySeries)> {
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
     
-    let (aroon_up, aroon_down) = {
-        let mut up = vec![None; high_vals.len()];
-        let mut down = vec![None; high_vals.len()];
+    let len = high_vals.len();
+    let mut up_out = vec![f64::NAN; len];
+    let mut down_out = vec![f64::NAN; len];
+    
+    // TA-Lib style: Track indices of extremes, only rescan when necessary
+    if let (Ok(high_input), Ok(low_input)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // Initialize: find first window's extremes
+        let mut highest_idx = 0;
+        let mut lowest_idx = 0;
+        let mut highest = high_input[0];
+        let mut lowest = low_input[0];
         
-        for i in period..high_vals.len() {
-            // 查找最高价和最低价的位置
-            let slice_start = i + 1 - period;
-            let high_slice = &high_vals[slice_start..=i];
-            let low_slice = &low_vals[slice_start..=i];
-            
-            let max_idx = high_slice.iter().enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-                
-            let min_idx = low_slice.iter().enumerate()
-                .max_by(|a, b| b.1.partial_cmp(a.1).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-            
-            up[i] = Some(((period - max_idx - 1) as f64 / period as f64) * 100.0);
-            down[i] = Some(((period - min_idx - 1) as f64 / period as f64) * 100.0);
+        for i in 1..period {
+            if high_input[i] >= highest {
+                highest = high_input[i];
+                highest_idx = i;
+            }
+            if low_input[i] <= lowest {
+                lowest = low_input[i];
+                lowest_idx = i;
+            }
         }
         
-        (up, down)
-    };
+        let factor = 100.0 / period as f64;
+        
+        // Slide window with index tracking
+        for today in period..len {
+            let trailing_idx = today - period;
+            
+            // Update if new extreme found
+            if high_input[today] >= highest {
+                highest = high_input[today];
+                highest_idx = today;
+            }
+            if low_input[today] <= lowest {
+                lowest = low_input[today];
+                lowest_idx = today;
+            }
+            
+            // Calculate Aroon based on distance from extreme
+            up_out[today] = ((period - (today - highest_idx)) as f64) * factor;
+            down_out[today] = ((period - (today - lowest_idx)) as f64) * factor;
+            
+            // Check if old extreme exited window - rescan if necessary
+            if highest_idx <= trailing_idx {
+                highest = high_input[trailing_idx + 1];
+                highest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if high_input[i] >= highest {
+                        highest = high_input[i];
+                        highest_idx = i;
+                    }
+                }
+            }
+            
+            if lowest_idx <= trailing_idx {
+                lowest = low_input[trailing_idx + 1];
+                lowest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if low_input[i] <= lowest {
+                        lowest = low_input[i];
+                        lowest_idx = i;
+                    }
+                }
+            }
+        }
+    } else {
+        // fallback
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut highest_idx = 0;
+        let mut lowest_idx = 0;
+        let mut highest = high_vec[0];
+        let mut lowest = low_vec[0];
+        
+        for i in 1..period {
+            if high_vec[i] >= highest {
+                highest = high_vec[i];
+                highest_idx = i;
+            }
+            if low_vec[i] <= lowest {
+                lowest = low_vec[i];
+                lowest_idx = i;
+            }
+        }
+        
+        let factor = 100.0 / period as f64;
+        
+        for today in period..len {
+            let trailing_idx = today - period;
+            
+            if high_vec[today] >= highest {
+                highest = high_vec[today];
+                highest_idx = today;
+            }
+            if low_vec[today] <= lowest {
+                lowest = low_vec[today];
+                lowest_idx = today;
+            }
+            
+            up_out[today] = ((period - (today - highest_idx)) as f64) * factor;
+            down_out[today] = ((period - (today - lowest_idx)) as f64) * factor;
+            
+            if highest_idx <= trailing_idx {
+                highest = high_vec[trailing_idx + 1];
+                highest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if high_vec[i] >= highest {
+                        highest = high_vec[i];
+                        highest_idx = i;
+                    }
+                }
+            }
+            
+            if lowest_idx <= trailing_idx {
+                lowest = low_vec[trailing_idx + 1];
+                lowest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if low_vec[i] <= lowest {
+                        lowest = low_vec[i];
+                        lowest_idx = i;
+                    }
+                }
+            }
+        }
+    }
     
     let base_name = h.name();
-    let up_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_up", base_name)), aroon_up);
-    let down_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_down", base_name)), aroon_down);
+    let up_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_up", base_name)), up_out);
+    let down_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_down", base_name)), down_out);
     
     Ok((PySeries(up_series), PySeries(down_series)))
 }
 
 /// 阿隆摆动指标 (AROONOSC)
+/// Simply reuse optimized AROON and subtract
 #[pyfunction]
 #[pyo3(signature = (high, low, period=14))]
 pub fn aroonosc(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
     
-    let aroonosc_values = {
-        let mut result = vec![None; high_vals.len()];
+    let len = high_vals.len();
+    let mut output = vec![f64::NAN; len];
+    
+    // Reuse AROON's optimized index tracking algorithm
+    if let (Ok(high_input), Ok(low_input)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        let mut highest_idx = 0;
+        let mut lowest_idx = 0;
+        let mut highest = high_input[0];
+        let mut lowest = low_input[0];
         
-        for i in period..high_vals.len() {
-            let slice_start = i + 1 - period;
-            let high_slice = &high_vals[slice_start..=i];
-            let low_slice = &low_vals[slice_start..=i];
-            
-            let max_idx = high_slice.iter().enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-                
-            let min_idx = low_slice.iter().enumerate()
-                .max_by(|a, b| b.1.partial_cmp(a.1).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-            
-            let aroon_up = ((period - max_idx - 1) as f64 / period as f64) * 100.0;
-            let aroon_down = ((period - min_idx - 1) as f64 / period as f64) * 100.0;
-            
-            result[i] = Some(aroon_up - aroon_down);
+        for i in 1..period {
+            if high_input[i] >= highest {
+                highest = high_input[i];
+                highest_idx = i;
+            }
+            if low_input[i] <= lowest {
+                lowest = low_input[i];
+                lowest_idx = i;
+            }
         }
         
-        result
-    };
+        let factor = 100.0 / period as f64;
+        
+        for today in period..len {
+            let trailing_idx = today - period;
+            
+            if high_input[today] >= highest {
+                highest = high_input[today];
+                highest_idx = today;
+            }
+            if low_input[today] <= lowest {
+                lowest = low_input[today];
+                lowest_idx = today;
+            }
+            
+            let aroon_up = ((period - (today - highest_idx)) as f64) * factor;
+            let aroon_down = ((period - (today - lowest_idx)) as f64) * factor;
+            output[today] = aroon_up - aroon_down;
+            
+            if highest_idx <= trailing_idx {
+                highest = high_input[trailing_idx + 1];
+                highest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if high_input[i] >= highest {
+                        highest = high_input[i];
+                        highest_idx = i;
+                    }
+                }
+            }
+            
+            if lowest_idx <= trailing_idx {
+                lowest = low_input[trailing_idx + 1];
+                lowest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if low_input[i] <= lowest {
+                        lowest = low_input[i];
+                        lowest_idx = i;
+                    }
+                }
+            }
+        }
+    } else {
+        // fallback with optimized algorithm too
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut highest_idx = 0;
+        let mut lowest_idx = 0;
+        let mut highest = high_vec[0];
+        let mut lowest = low_vec[0];
+        
+        for i in 1..period {
+            if high_vec[i] >= highest {
+                highest = high_vec[i];
+                highest_idx = i;
+            }
+            if low_vec[i] <= lowest {
+                lowest = low_vec[i];
+                lowest_idx = i;
+            }
+        }
+        
+        let factor = 100.0 / period as f64;
+        
+        for today in period..len {
+            let trailing_idx = today - period;
+            
+            if high_vec[today] >= highest {
+                highest = high_vec[today];
+                highest_idx = today;
+            }
+            if low_vec[today] <= lowest {
+                lowest = low_vec[today];
+                lowest_idx = today;
+            }
+            
+            let aroon_up = ((period - (today - highest_idx)) as f64) * factor;
+            let aroon_down = ((period - (today - lowest_idx)) as f64) * factor;
+            output[today] = aroon_up - aroon_down;
+            
+            if highest_idx <= trailing_idx {
+                highest = high_vec[trailing_idx + 1];
+                highest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if high_vec[i] >= highest {
+                        highest = high_vec[i];
+                        highest_idx = i;
+                    }
+                }
+            }
+            
+            if lowest_idx <= trailing_idx {
+                lowest = low_vec[trailing_idx + 1];
+                lowest_idx = trailing_idx + 1;
+                for i in (trailing_idx + 2)..=today {
+                    if low_vec[i] <= lowest {
+                        lowest = low_vec[i];
+                        lowest_idx = i;
+                    }
+                }
+            }
+        }
+    }
     
-    let result = Series::new(h.name().clone(), aroonosc_values);
+    let result = Series::new(h.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1168,55 +1890,96 @@ pub fn plus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) ->
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let plus_di_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period + 1 {
+        return Ok(PySeries(Series::new(c.name().clone(), result)));
+    }
+    
+    // 零拷贝优化
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
-        if close_vals.len() >= period + 1 {
-            // 计算TR, +DM
-            let mut tr_values = Vec::new();
-            let mut plus_dm = Vec::new();
+        // 预计算所有 TR 和 +DM
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            // 内联 TR 计算
+            let hl = h_arr[i] - l_arr[i];
+            let hc = (h_arr[i] - c_arr[i - 1]).abs();
+            let lc = (l_arr[i] - c_arr[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
             
-            for i in 1..close_vals.len() {
-                // 计算真实波幅 (True Range)
-                let hl = high_vals[i] - low_vals[i];
-                let hc = (high_vals[i] - close_vals[i - 1]).abs();
-                let lc = (low_vals[i] - close_vals[i - 1]).abs();
-                let tr = hl.max(hc).max(lc);
-                tr_values.push(tr);
-                
-                // 计算+DM
-                let high_diff = high_vals[i] - high_vals[i - 1];
-                let low_diff = low_vals[i - 1] - low_vals[i];
-                let plus_dm_val = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
-                plus_dm.push(plus_dm_val);
-            }
-            
-            // 计算平滑的TR, +DM
-            if tr_values.len() >= period {
-                // 计算初始平均值
-                let mut smooth_tr: f64 = tr_values[0..period].iter().sum::<f64>();
-                let mut smooth_plus_dm: f64 = plus_dm[0..period].iter().sum::<f64>();
-                
-                for i in period..tr_values.len() {
-                    // Wilder's平滑
-                    smooth_tr = smooth_tr - (smooth_tr / period as f64) + tr_values[i];
-                    smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm / period as f64) + plus_dm[i];
-                    
-                    let plus_di = if smooth_tr > 0.0 { 100.0 * smooth_plus_dm / smooth_tr } else { 0.0 };
-                    result[i + 1] = Some(plus_di);
-                }
-            }
+            // 内联 +DM 计算
+            let high_diff = h_arr[i] - h_arr[i - 1];
+            let low_diff = l_arr[i - 1] - l_arr[i];
+            plus_dm[i] = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
         }
         
-        result
-    };
+        // Wilder 平滑初始化
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_plus_dm: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        
+        result[period] = if smooth_tr > 0.0 { 
+            Some(100.0 * smooth_plus_dm / smooth_tr) 
+        } else { 
+            Some(0.0) 
+        };
+        
+        // 预计算 Wilder 平滑系数
+        let inv_period = 1.0 / period as f64;
+        
+        for i in (period + 1)..len {
+            // Wilder's 平滑: smooth = smooth - smooth/period + new_value
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm * inv_period) + plus_dm[i];
+            
+            result[i] = if smooth_tr > 0.0 { 
+                Some(100.0 * smooth_plus_dm / smooth_tr) 
+            } else { 
+                Some(0.0) 
+            };
+        }
+    } else {
+        // Fallback
+        let high_vals: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vals: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vals: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            let hl = high_vals[i] - low_vals[i];
+            let hc = (high_vals[i] - close_vals[i - 1]).abs();
+            let lc = (low_vals[i] - close_vals[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
+            
+            let high_diff = high_vals[i] - high_vals[i - 1];
+            let low_diff = low_vals[i - 1] - low_vals[i];
+            plus_dm[i] = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
+        }
+        
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_plus_dm: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        
+        result[period] = if smooth_tr > 0.0 { Some(100.0 * smooth_plus_dm / smooth_tr) } else { Some(0.0) };
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm * inv_period) + plus_dm[i];
+            result[i] = if smooth_tr > 0.0 { Some(100.0 * smooth_plus_dm / smooth_tr) } else { Some(0.0) };
+        }
+    }
     
-    let result = Series::new(c.name().clone(), plus_di_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 /// 负方向指标 (MINUS_DI)
@@ -1227,55 +1990,96 @@ pub fn minus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let minus_di_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period + 1 {
+        return Ok(PySeries(Series::new(c.name().clone(), result)));
+    }
+    
+    // 零拷贝优化
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
-        if close_vals.len() >= period + 1 {
-            // 计算TR, -DM
-            let mut tr_values = Vec::new();
-            let mut minus_dm = Vec::new();
+        // 预计算所有 TR 和 -DM
+        let mut tr = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            // 内联 TR 计算
+            let hl = h_arr[i] - l_arr[i];
+            let hc = (h_arr[i] - c_arr[i - 1]).abs();
+            let lc = (l_arr[i] - c_arr[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
             
-            for i in 1..close_vals.len() {
-                // 计算真实波幅 (True Range)
-                let hl = high_vals[i] - low_vals[i];
-                let hc = (high_vals[i] - close_vals[i - 1]).abs();
-                let lc = (low_vals[i] - close_vals[i - 1]).abs();
-                let tr = hl.max(hc).max(lc);
-                tr_values.push(tr);
-                
-                // 计算-DM
-                let high_diff = high_vals[i] - high_vals[i - 1];
-                let low_diff = low_vals[i - 1] - low_vals[i];
-                let minus_dm_val = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
-                minus_dm.push(minus_dm_val);
-            }
-            
-            // 计算平滑的TR, -DM
-            if tr_values.len() >= period {
-                // 计算初始平均值
-                let mut smooth_tr: f64 = tr_values[0..period].iter().sum::<f64>();
-                let mut smooth_minus_dm: f64 = minus_dm[0..period].iter().sum::<f64>();
-                
-                for i in period..tr_values.len() {
-                    // Wilder's平滑
-                    smooth_tr = smooth_tr - (smooth_tr / period as f64) + tr_values[i];
-                    smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm / period as f64) + minus_dm[i];
-                    
-                    let minus_di = if smooth_tr > 0.0 { 100.0 * smooth_minus_dm / smooth_tr } else { 0.0 };
-                    result[i + 1] = Some(minus_di);
-                }
-            }
+            // 内联 -DM 计算
+            let high_diff = h_arr[i] - h_arr[i - 1];
+            let low_diff = l_arr[i - 1] - l_arr[i];
+            minus_dm[i] = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
         }
         
-        result
-    };
+        // Wilder 平滑初始化
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_minus_dm: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        
+        result[period] = if smooth_tr > 0.0 { 
+            Some(100.0 * smooth_minus_dm / smooth_tr) 
+        } else { 
+            Some(0.0) 
+        };
+        
+        // 预计算 Wilder 平滑系数
+        let inv_period = 1.0 / period as f64;
+        
+        for i in (period + 1)..len {
+            // Wilder's 平滑
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm * inv_period) + minus_dm[i];
+            
+            result[i] = if smooth_tr > 0.0 { 
+                Some(100.0 * smooth_minus_dm / smooth_tr) 
+            } else { 
+                Some(0.0) 
+            };
+        }
+    } else {
+        // Fallback
+        let high_vals: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vals: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vals: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut tr = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            let hl = high_vals[i] - low_vals[i];
+            let hc = (high_vals[i] - close_vals[i - 1]).abs();
+            let lc = (low_vals[i] - close_vals[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
+            
+            let high_diff = high_vals[i] - high_vals[i - 1];
+            let low_diff = low_vals[i - 1] - low_vals[i];
+            minus_dm[i] = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
+        }
+        
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_minus_dm: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        
+        result[period] = if smooth_tr > 0.0 { Some(100.0 * smooth_minus_dm / smooth_tr) } else { Some(0.0) };
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm * inv_period) + minus_dm[i];
+            result[i] = if smooth_tr > 0.0 { Some(100.0 * smooth_minus_dm / smooth_tr) } else { Some(0.0) };
+        }
+    }
     
-    let result = Series::new(c.name().clone(), minus_di_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 /// 正方向移动 (PLUS_DM)
@@ -1285,39 +2089,60 @@ pub fn plus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySerie
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
     
-    let plus_dm_values = {
-        let mut result = vec![None; high_vals.len()];
-        
-        if high_vals.len() >= period + 1 {
-            let mut plus_dm = Vec::new();
-            
-            for i in 1..high_vals.len() {
-                let high_diff = high_vals[i] - high_vals[i - 1];
-                let low_diff = low_vals[i - 1] - low_vals[i];
-                let plus_dm_val = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
-                plus_dm.push(plus_dm_val);
-            }
-            
-            // 使用Wilder平滑
-            if plus_dm.len() >= period {
-                let mut smooth_plus_dm: f64 = plus_dm[0..period].iter().sum::<f64>();
-                result[period] = Some(smooth_plus_dm);
-                
-                for i in period..plus_dm.len() {
-                    smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm / period as f64) + plus_dm[i];
-                    result[i + 1] = Some(smooth_plus_dm);
-                }
-            }
+    let len = high_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period + 1 {
+        let result_series = Series::new(h.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // Zero-copy optimization
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // Pre-compute all +DM values
+        let mut plus_dm = vec![0.0; len];
+        for i in 1..len {
+            let high_diff = h_arr[i] - h_arr[i - 1];
+            let low_diff = l_arr[i - 1] - l_arr[i];
+            plus_dm[i] = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
         }
         
-        result
-    };
+        // Wilder smoothing
+        let mut smooth: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        result[period] = Some(smooth);
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth = smooth - (smooth * inv_period) + plus_dm[i];
+            result[i] = Some(smooth);
+        }
+    } else {
+        // Fallback
+        let h_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let l_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut plus_dm = vec![0.0; len];
+        for i in 1..len {
+            let high_diff = h_vec[i] - h_vec[i - 1];
+            let low_diff = l_vec[i - 1] - l_vec[i];
+            plus_dm[i] = if high_diff > low_diff && high_diff > 0.0 { high_diff } else { 0.0 };
+        }
+        
+        let mut smooth: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        result[period] = Some(smooth);
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth = smooth - (smooth * inv_period) + plus_dm[i];
+            result[i] = Some(smooth);
+        }
+    }
     
-    let result = Series::new(h.name().clone(), plus_dm_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(h.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 负方向移动 (MINUS_DM)
@@ -1327,39 +2152,61 @@ pub fn minus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeri
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
     
-    let minus_dm_values = {
-        let mut result = vec![None; high_vals.len()];
-        
-        if high_vals.len() >= period + 1 {
-            let mut minus_dm = Vec::new();
-            
-            for i in 1..high_vals.len() {
-                let high_diff = high_vals[i] - high_vals[i - 1];
-                let low_diff = low_vals[i - 1] - low_vals[i];
-                let minus_dm_val = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
-                minus_dm.push(minus_dm_val);
-            }
-            
-            // 使用Wilder平滑
-            if minus_dm.len() >= period {
-                let mut smooth_minus_dm: f64 = minus_dm[0..period].iter().sum::<f64>();
-                result[period] = Some(smooth_minus_dm);
-                
-                for i in period..minus_dm.len() {
-                    smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm / period as f64) + minus_dm[i];
-                    result[i + 1] = Some(smooth_minus_dm);
-                }
-            }
+    let len = high_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period + 1 {
+        let result_series = Series::new(l.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // Zero-copy optimization
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        // Pre-compute all -DM values
+        let mut minus_dm = vec![0.0; len];
+        for i in 1..len {
+            let high_diff = h_arr[i] - h_arr[i - 1];
+            let low_diff = l_arr[i - 1] - l_arr[i];
+            minus_dm[i] = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
         }
         
-        result
-    };
+        // Wilder smoothing
+        let mut smooth: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        result[period] = Some(smooth);
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth = smooth - (smooth * inv_period) + minus_dm[i];
+            result[i] = Some(smooth);
+        }
+    } else {
+        // Fallback
+        let h_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let l_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut minus_dm = vec![0.0; len];
+        for i in 1..len {
+            let high_diff = h_vec[i] - h_vec[i - 1];
+            let low_diff = l_vec[i - 1] - l_vec[i];
+            minus_dm[i] = if low_diff > high_diff && low_diff > 0.0 { low_diff } else { 0.0 };
+        }
+        
+        // Wilder smoothing
+        let mut smooth: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        result[period] = Some(smooth);
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth = smooth - (smooth * inv_period) + minus_dm[i];
+            result[i] = Some(smooth);
+        }
+    }
     
-    let result = Series::new(h.name().clone(), minus_dm_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(l.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 均势指标 (BOP)
@@ -1371,22 +2218,45 @@ pub fn bop(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> Py
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let open_vals = o.f64().unwrap();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let bop_values: Vec<f64> = (0..close_vals.len()).map(|i| {
-        let range = high_vals[i] - low_vals[i];
-        if range > 0.0 {
-            (close_vals[i] - open_vals[i]) / range
-        } else {
-            0.0
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
+    
+    // 优化: 零拷贝路径 + 简洁实现
+    if let (Ok(o_arr), Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (open_vals.cont_slice(), high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        
+        for i in 0..len {
+            let range = h_arr[i] - l_arr[i];
+            result[i] = if range > 0.0 {
+                (c_arr[i] - o_arr[i]) / range
+            } else {
+                0.0
+            };
         }
-    }).collect();
+    } else {
+        // 后备路径
+        for i in 0..len {
+            let o = open_vals.get(i).unwrap_or(0.0);
+            let h = high_vals.get(i).unwrap_or(0.0);
+            let l = low_vals.get(i).unwrap_or(0.0);
+            let c = close_vals.get(i).unwrap_or(0.0);
+            
+            let range = h - l;
+            result[i] = if range > 0.0 {
+                (c - o) / range
+            } else {
+                0.0
+            };
+        }
+    }
     
-    let result = Series::new(c.name().clone(), bop_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 商品通道指数 (CCI)
@@ -1397,45 +2267,62 @@ pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let c_name = c.name().clone();
+    
+    // 向量化计算典型价格: TP = (H + L + C) / 3
+    let h_plus_l = (&h + &l)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("h+l failed: {}", e)))?;
+    let tp = (h_plus_l + c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("tp failed: {}", e)))?
+        .cast(&DataType::Float64)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cast failed: {}", e)))?
+        / 3.0;
+    
+    // 使用 rolling_mean 计算 SMA(TP)
+    let rolling_opts = RollingOptionsFixedWindow {
+        window_size: period,
+        min_periods: period,
+        center: false,
+        ..Default::default()
+    };
+    
+    let sma_tp = tp.rolling_mean(rolling_opts.clone())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("rolling_mean failed: {}", e)))?;
+    
+    // 计算平均绝对偏差：需要手动循环（无原生rolling MAD）
+    let tp_vals: Vec<f64> = tp.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let sma_vals: Vec<f64> = sma_tp.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     let cci_values = {
-        let mut result = vec![None; close_vals.len()];
+        let mut result = vec![None; tp_vals.len()];
         
-        for i in period - 1..close_vals.len() {
-            // 计算典型价格
-            let mut tp_sum = 0.0;
-            let mut tp_values = Vec::new();
-            
-            for j in (i + 1 - period)..=i {
-                let tp = (high_vals[j] + low_vals[j] + close_vals[j]) / 3.0;
-                tp_values.push(tp);
-                tp_sum += tp;
+        for i in period - 1..tp_vals.len() {
+            let sma = sma_vals[i];
+            if sma == 0.0 {
+                continue;
             }
             
-            let sma_tp = tp_sum / period as f64;
-            
-            // 计算平均偏差
-            let mean_deviation: f64 = tp_values.iter()
-                .map(|&tp| (tp - sma_tp).abs())
-                .sum::<f64>() / period as f64;
+            // 计算窗口内的平均绝对偏差
+            let mut mad_sum = 0.0;
+            for j in (i + 1 - period)..=i {
+                mad_sum += (tp_vals[j] - sma).abs();
+            }
+            let mean_deviation = mad_sum / period as f64;
             
             if mean_deviation > 0.0 {
-                let cci = (tp_values[period - 1] - sma_tp) / (0.015 * mean_deviation);
+                let cci = (tp_vals[i] - sma) / (0.015 * mean_deviation);
                 result[i] = Some(cci);
             }
         }
         
         result
     };
-    let result = Series::new(c.name().clone(), cci_values);
     
+    let result = Series::new(c_name, cci_values);
     Ok(PySeries(result))
 }
 
-/// 钱德动量摆动指标 (CMO)
+/// 钱德动量摆动指标 (CMO) - 零拷贝优化版本
 #[pyfunction]
 #[pyo3(signature = (series, period=14))]
 pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -1443,38 +2330,87 @@ pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-    let cmo_values = {
-        let mut result = vec![None; vec_values.len()];
+    let len = values.len();
+    let mut result = vec![f64::NAN; len];
+    
+    if period == 0 || period >= len {
+        let result_series = Series::new(s.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 优化: 零拷贝路径
+    if let Ok(arr) = values.cont_slice() {
+        // 滑动窗口计算
+        let mut up_sum = 0.0;
+        let mut down_sum = 0.0;
         
-        if vec_values.len() > period {
-            for i in period..vec_values.len() {
-                let mut up_sum = 0.0;
-                let mut down_sum = 0.0;
-                
-                for j in (i + 1 - period)..=i {
-                    if j > 0 {
-                        let change = vec_values[j] - vec_values[j - 1];
-                        if change > 0.0 {
-                            up_sum += change;
-                        } else {
-                            down_sum += -change;
-                        }
-                    }
-                }
-                
-                let total_change = up_sum + down_sum;
-                if total_change > 0.0 {
-                    result[i] = Some(100.0 * (up_sum - down_sum) / total_change);
-                }
+        // 初始化第一个窗口
+        for i in 1..=period {
+            let change = arr[i] - arr[i - 1];
+            if change > 0.0 {
+                up_sum += change;
+            } else if change < 0.0 {
+                down_sum += -change;
             }
         }
         
-        result
-    };
-    let result = Series::new(s.name().clone(), cmo_values);
+        let total = up_sum + down_sum;
+        if total > 0.0 {
+            result[period] = 100.0 * (up_sum - down_sum) / total;
+        }
+        
+        // 滑动窗口
+        for i in (period + 1)..len {
+            let old_change = arr[i - period] - arr[i - period - 1];
+            let new_change = arr[i] - arr[i - 1];
+            
+            // 移除窗口左侧的值
+            if old_change > 0.0 {
+                up_sum -= old_change;
+            } else if old_change < 0.0 {
+                down_sum -= -old_change;
+            }
+            
+            // 添加窗口右侧的值
+            if new_change > 0.0 {
+                up_sum += new_change;
+            } else if new_change < 0.0 {
+                down_sum += -new_change;
+            }
+            
+            let total = up_sum + down_sum;
+            if total > 0.0 {
+                result[i] = 100.0 * (up_sum - down_sum) / total;
+            }
+        }
+    } else {
+        // 后备路径
+        for i in period..len {
+            let mut up_sum = 0.0;
+            let mut down_sum = 0.0;
+            
+            for j in (i + 1 - period)..=i {
+                if j > 0 {
+                    let curr = values.get(j).unwrap_or(0.0);
+                    let prev = values.get(j - 1).unwrap_or(0.0);
+                    let change = curr - prev;
+                    if change > 0.0 {
+                        up_sum += change;
+                    } else if change < 0.0 {
+                        down_sum += -change;
+                    }
+                }
+            }
+            
+            let total = up_sum + down_sum;
+            if total > 0.0 {
+                result[i] = 100.0 * (up_sum - down_sum) / total;
+            }
+        }
+    }
     
-    Ok(PySeries(result))
+    let result_series = Series::new(s.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 方向性指标 (DX)
@@ -1485,70 +2421,126 @@ pub fn dx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyRe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let dx_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    if len < period + 1 {
+        return Ok(PySeries(Series::new(c.name().clone(), result)));
+    }
+    
+    // 零拷贝优化
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
-        if close_vals.len() >= period + 1 {
-            // 计算True Range和Directional Movement
-            let mut tr_values = Vec::new();
-            let mut plus_dm_values = Vec::new();
-            let mut minus_dm_values = Vec::new();
+        // 预计算所有 TR, +DM, -DM
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            // 内联 TR 计算
+            let hl = h_arr[i] - l_arr[i];
+            let hc = (h_arr[i] - c_arr[i - 1]).abs();
+            let lc = (l_arr[i] - c_arr[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
             
-            for i in 1..close_vals.len() {
-                // True Range
-                let tr1 = high_vals[i] - low_vals[i];
-                let tr2 = (high_vals[i] - close_vals[i - 1]).abs();
-                let tr3 = (low_vals[i] - close_vals[i - 1]).abs();
-                let tr = tr1.max(tr2.max(tr3));
-                tr_values.push(tr);
-                
-                // Directional Movement
-                let up_move = high_vals[i] - high_vals[i - 1];
-                let down_move = low_vals[i - 1] - low_vals[i];
-                
-                let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
-                let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
-                
-                plus_dm_values.push(plus_dm);
-                minus_dm_values.push(minus_dm);
-            }
-            
-            // 计算平滑化的值
-            if tr_values.len() >= period {
-                for i in period..tr_values.len() + 1 {
-                    let start_idx = i - period;
-                    let end_idx = i;
-                    
-                    let tr_sum: f64 = tr_values[start_idx..end_idx].iter().sum();
-                    let plus_dm_sum: f64 = plus_dm_values[start_idx..end_idx].iter().sum();
-                    let minus_dm_sum: f64 = minus_dm_values[start_idx..end_idx].iter().sum();
-                    
-                    if tr_sum > 0.0 {
-                        let plus_di = 100.0 * plus_dm_sum / tr_sum;
-                        let minus_di = 100.0 * minus_dm_sum / tr_sum;
-                        
-                        let di_sum = plus_di + minus_di;
-                        let dx = if di_sum > 0.0 {
-                            100.0 * (plus_di - minus_di).abs() / di_sum
-                        } else {
-                            0.0
-                        };
-                        
-                        result[i] = Some(dx);
-                    }
-                }
-            }
+            // 内联 DM 计算
+            let up_move = h_arr[i] - h_arr[i - 1];
+            let down_move = l_arr[i - 1] - l_arr[i];
+            plus_dm[i] = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+            minus_dm[i] = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
         }
         
-        result
-    };
+        // Wilder 平滑初始化
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_plus_dm: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        let mut smooth_minus_dm: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        
+        // 计算第一个 DX 值
+        if smooth_tr > 0.0 {
+            let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+            let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+            let di_sum = plus_di + minus_di;
+            result[period] = if di_sum > 0.0 {
+                Some(100.0 * (plus_di - minus_di).abs() / di_sum)
+            } else {
+                Some(0.0)
+            };
+        }
+        
+        // 预计算 Wilder 平滑系数
+        let inv_period = 1.0 / period as f64;
+        
+        for i in (period + 1)..len {
+            // Wilder's 平滑
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm * inv_period) + plus_dm[i];
+            smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm * inv_period) + minus_dm[i];
+            
+            if smooth_tr > 0.0 {
+                let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+                let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+                let di_sum = plus_di + minus_di;
+                result[i] = if di_sum > 0.0 {
+                    Some(100.0 * (plus_di - minus_di).abs() / di_sum)
+                } else {
+                    Some(0.0)
+                };
+            }
+        }
+    } else {
+        // Fallback
+        let high_vals: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vals: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vals: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut tr = vec![0.0; len];
+        let mut plus_dm = vec![0.0; len];
+        let mut minus_dm = vec![0.0; len];
+        
+        for i in 1..len {
+            let hl = high_vals[i] - low_vals[i];
+            let hc = (high_vals[i] - close_vals[i - 1]).abs();
+            let lc = (low_vals[i] - close_vals[i - 1]).abs();
+            tr[i] = hl.max(hc).max(lc);
+            
+            let up_move = high_vals[i] - high_vals[i - 1];
+            let down_move = low_vals[i - 1] - low_vals[i];
+            plus_dm[i] = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+            minus_dm[i] = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        }
+        
+        let mut smooth_tr: f64 = (1..=period).map(|i| tr[i]).sum();
+        let mut smooth_plus_dm: f64 = (1..=period).map(|i| plus_dm[i]).sum();
+        let mut smooth_minus_dm: f64 = (1..=period).map(|i| minus_dm[i]).sum();
+        
+        if smooth_tr > 0.0 {
+            let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+            let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+            let di_sum = plus_di + minus_di;
+            result[period] = if di_sum > 0.0 { Some(100.0 * (plus_di - minus_di).abs() / di_sum) } else { Some(0.0) };
+        }
+        
+        let inv_period = 1.0 / period as f64;
+        for i in (period + 1)..len {
+            smooth_tr = smooth_tr - (smooth_tr * inv_period) + tr[i];
+            smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm * inv_period) + plus_dm[i];
+            smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm * inv_period) + minus_dm[i];
+            
+            if smooth_tr > 0.0 {
+                let plus_di = 100.0 * smooth_plus_dm / smooth_tr;
+                let minus_di = 100.0 * smooth_minus_dm / smooth_tr;
+                let di_sum = plus_di + minus_di;
+                result[i] = if di_sum > 0.0 { Some(100.0 * (plus_di - minus_di).abs() / di_sum) } else { Some(0.0) };
+            }
+        }
+    }
     
-    let result = Series::new(c.name().clone(), dx_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 /// MACD (移动平均收敛发散指标)
@@ -1691,7 +2683,7 @@ pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries,
     Ok((PySeries(dif_series), PySeries(dea_series), PySeries(macd_series)))
 }
 
-/// 资金流量指标 (MFI)
+/// 资金流量指标 (MFI) - 零拷贝优化版本
 #[pyfunction]
 #[pyo3(signature = (high, low, close, volume, period=14))]
 pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, period: usize) -> PyResult<PySeries> {
@@ -1707,68 +2699,155 @@ pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, per
         v
     };
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let volume_vals: Vec<f64> = v_f64.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
+    let volume_vals = v_f64.f64().unwrap();
     
-    let mfi_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![f64::NAN; len];
+    
+    if period == 0 || period >= len {
+        let result_series = Series::new(c.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 优化: 零拷贝路径 + 滑动窗口
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr), Ok(v_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice(), volume_vals.cont_slice()) {
         
-        if close_vals.len() > period {
-            for i in period..close_vals.len() {
-                let mut positive_flow = 0.0;
-                let mut negative_flow = 0.0;
-                
-                for j in (i + 1 - period)..=i {
-                    if j > 0 {
-                        let tp = (high_vals[j] + low_vals[j] + close_vals[j]) / 3.0;
-                        let prev_tp = (high_vals[j - 1] + low_vals[j - 1] + close_vals[j - 1]) / 3.0;
-                        let money_flow = tp * volume_vals[j];
-                        
-                        if tp > prev_tp {
-                            positive_flow += money_flow;
-                        } else if tp < prev_tp {
-                            negative_flow += money_flow;
-                        }
-                    }
-                }
-                
-                if negative_flow > 0.0 {
-                    let mfi_ratio = positive_flow / negative_flow;
-                    result[i] = Some(100.0 - (100.0 / (1.0 + mfi_ratio)));
+        // 预计算所有典型价格和资金流
+        let mut tp = vec![0.0; len];
+        let mut money_flow = vec![0.0; len];
+        let mut flow_direction = vec![0i8; len]; // 1: positive, -1: negative, 0: no change
+        
+        let one_third = 1.0 / 3.0;
+        for i in 0..len {
+            tp[i] = (h_arr[i] + l_arr[i] + c_arr[i]) * one_third;
+            money_flow[i] = tp[i] * v_arr[i];
+            
+            if i > 0 {
+                if tp[i] > tp[i - 1] {
+                    flow_direction[i] = 1;
+                } else if tp[i] < tp[i - 1] {
+                    flow_direction[i] = -1;
                 }
             }
         }
         
-        result
-    };
-    let result = Series::new(c.name().clone(), mfi_values);
+        // 初始化第一个窗口
+        let mut positive_flow = 0.0;
+        let mut negative_flow = 0.0;
+        
+        for i in 1..=period {
+            if flow_direction[i] == 1 {
+                positive_flow += money_flow[i];
+            } else if flow_direction[i] == -1 {
+                negative_flow += money_flow[i];
+            }
+        }
+        
+        // 计算第一个MFI值
+        if negative_flow > 0.0 {
+            let mfi_ratio = positive_flow / negative_flow;
+            result[period] = 100.0 - (100.0 / (1.0 + mfi_ratio));
+        } else if positive_flow > 0.0 {
+            result[period] = 100.0;
+        }
+        
+        // 滑动窗口计算后续MFI值
+        for i in (period + 1)..len {
+            // 移除最老的bar
+            let old_idx = i - period;
+            if flow_direction[old_idx] == 1 {
+                positive_flow -= money_flow[old_idx];
+            } else if flow_direction[old_idx] == -1 {
+                negative_flow -= money_flow[old_idx];
+            }
+            
+            // 添加最新的bar
+            if flow_direction[i] == 1 {
+                positive_flow += money_flow[i];
+            } else if flow_direction[i] == -1 {
+                negative_flow += money_flow[i];
+            }
+            
+            // 计算MFI
+            if negative_flow > 0.0 {
+                let mfi_ratio = positive_flow / negative_flow;
+                result[i] = 100.0 - (100.0 / (1.0 + mfi_ratio));
+            } else if positive_flow > 0.0 {
+                result[i] = 100.0;
+            }
+        }
+    } else {
+        // 后备路径
+        for i in period..len {
+            let mut positive_flow = 0.0;
+            let mut negative_flow = 0.0;
+            
+            for j in (i + 1 - period)..=i {
+                if j > 0 {
+                    let h = high_vals.get(j).unwrap_or(0.0);
+                    let l = low_vals.get(j).unwrap_or(0.0);
+                    let c = close_vals.get(j).unwrap_or(0.0);
+                    let v = volume_vals.get(j).unwrap_or(0.0);
+                    
+                    let h_prev = high_vals.get(j - 1).unwrap_or(0.0);
+                    let l_prev = low_vals.get(j - 1).unwrap_or(0.0);
+                    let c_prev = close_vals.get(j - 1).unwrap_or(0.0);
+                    
+                    let tp = (h + l + c) / 3.0;
+                    let prev_tp = (h_prev + l_prev + c_prev) / 3.0;
+                    let money_flow = tp * v;
+                    
+                    if tp > prev_tp {
+                        positive_flow += money_flow;
+                    } else if tp < prev_tp {
+                        negative_flow += money_flow;
+                    }
+                }
+            }
+            
+            if negative_flow > 0.0 {
+                let mfi_ratio = positive_flow / negative_flow;
+                result[i] = 100.0 - (100.0 / (1.0 + mfi_ratio));
+            } else if positive_flow > 0.0 {
+                result[i] = 100.0;
+            }
+        }
+    }
     
-    Ok(PySeries(result))
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
-/// 动量指标 (MOM)
+/// 动量指标 (MOM) - 使用 Polars 原生操作优化
 #[pyfunction]
 #[pyo3(signature = (series, period=10))]
 pub fn mom(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
     let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to convert series to f64: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let mom_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        for i in period..vec_values.len() {
-            result[i] = Some(vec_values[i] - vec_values[i - period]);
+    // 零拷贝访问 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        for i in period..len {
+            output[i] = input[i] - input[i - period];
         }
-        
-        result
-    };
+    } else {
+        // fallback: 标准访问
+        for i in period..len {
+            if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
+                output[i] = curr - prev;
+            }
+        }
+    }
     
-    let result = Series::new(s.name().clone(), mom_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1806,22 +2885,28 @@ pub fn roc(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let roc_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        for i in period..vec_values.len() {
-            let prev_value = vec_values[i - period];
-            if prev_value != 0.0 {
-                result[i] = Some(((vec_values[i] - prev_value) / prev_value) * 100.0);
+    // 零拷贝 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        for i in period..len {
+            let prev = input[i - period];
+            if prev != 0.0 {
+                output[i] = ((input[i] - prev) / prev) * 100.0;
             }
         }
-        
-        result
-    };
+    } else {
+        for i in period..len {
+            if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
+                if prev != 0.0 {
+                    output[i] = ((curr - prev) / prev) * 100.0;
+                }
+            }
+        }
+    }
     
-    let result = Series::new(s.name().clone(), roc_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1833,23 +2918,28 @@ pub fn rocp(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let rocp_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        for i in period..vec_values.len() {
-            let prev_value = vec_values[i - period];
-            if prev_value != 0.0 {
-                // ROCP = (current - prev) / prev (无100倍数)
-                result[i] = Some((vec_values[i] - prev_value) / prev_value);
+    // 零拷贝 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        for i in period..len {
+            let prev = input[i - period];
+            if prev != 0.0 {
+                output[i] = (input[i] - prev) / prev;
             }
         }
-        
-        result
-    };
+    } else {
+        for i in period..len {
+            if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
+                if prev != 0.0 {
+                    output[i] = (curr - prev) / prev;
+                }
+            }
+        }
+    }
     
-    let result = Series::new(s.name().clone(), rocp_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1861,23 +2951,28 @@ pub fn rocr(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let rocr_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        for i in period..vec_values.len() {
-            let prev_value = vec_values[i - period];
-            if prev_value != 0.0 {
-                // ROCR = current / prev
-                result[i] = Some(vec_values[i] / prev_value);
+    // 零拷贝 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        for i in period..len {
+            let prev = input[i - period];
+            if prev != 0.0 {
+                output[i] = input[i] / prev;
             }
         }
-        
-        result
-    };
+    } else {
+        for i in period..len {
+            if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
+                if prev != 0.0 {
+                    output[i] = curr / prev;
+                }
+            }
+        }
+    }
     
-    let result = Series::new(s.name().clone(), rocr_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1889,23 +2984,28 @@ pub fn rocr100(series: PySeries, period: usize) -> PyResult<PySeries> {
     let values = s.f64()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
     
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let len = values.len();
+    let mut output = vec![f64::NAN; len];
     
-    let rocr100_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        for i in period..vec_values.len() {
-            let prev_value = vec_values[i - period];
-            if prev_value != 0.0 {
-                // ROCR100 = (current / prev) * 100
-                result[i] = Some((vec_values[i] / prev_value) * 100.0);
+    // 零拷贝 + tight loop
+    if let Ok(input) = values.cont_slice() {
+        for i in period..len {
+            let prev = input[i - period];
+            if prev != 0.0 {
+                output[i] = (input[i] / prev) * 100.0;
             }
         }
-        
-        result
-    };
+    } else {
+        for i in period..len {
+            if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
+                if prev != 0.0 {
+                    output[i] = (curr / prev) * 100.0;
+                }
+            }
+        }
+    }
     
-    let result = Series::new(s.name().clone(), rocr100_values);
+    let result = Series::new(s.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -1933,33 +3033,53 @@ pub fn stoch(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    // 计算%K
-    let mut k_values = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut k_values = vec![f64::NAN; len];
     
-    for i in k_period - 1..close_vals.len() {
-        let slice_start = i + 1 - k_period;
-        let high_slice = &high_vals[slice_start..=i];
-        let low_slice = &low_vals[slice_start..=i];
+    // 零拷贝 + tight loop 计算%K
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in k_period - 1..len {
+            let start = i + 1 - k_period;
+            
+            let mut highest = h_arr[start];
+            let mut lowest = l_arr[start];
+            for j in start + 1..=i {
+                if h_arr[j] > highest { highest = h_arr[j]; }
+                if l_arr[j] < lowest { lowest = l_arr[j]; }
+            }
+            
+            let range = highest - lowest;
+            if range != 0.0 {
+                k_values[i] = ((c_arr[i] - lowest) / range) * 100.0;
+            }
+        }
+    } else {
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        let highest = high_slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let lowest = low_slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        
-        if highest != lowest {
-            k_values[i] = Some(((close_vals[i] - lowest) / (highest - lowest)) * 100.0);
+        for i in k_period - 1..len {
+            let start = i + 1 - k_period;
+            let highest = high_vec[start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let lowest = low_vec[start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            
+            if highest != lowest {
+                k_values[i] = ((close_vec[i] - lowest) / (highest - lowest)) * 100.0;
+            }
         }
     }
     
     // 计算%D (K的移动平均)
-    let k_vals_for_d: Vec<f64> = k_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
-    let d_values = calculate_ma(&k_vals_for_d, d_period, MAType::SMA);
+    let d_values = calculate_ma(&k_values, d_period, MAType::SMA);
+    let d_vec: Vec<f64> = d_values.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
     
     let base_name = h.name();
     let k_series = Series::new(PlSmallStr::from_str(&format!("{}_stoch_k", base_name)), k_values);
-    let d_series = Series::new(PlSmallStr::from_str(&format!("{}_stoch_d", base_name)), d_values);
+    let d_series = Series::new(PlSmallStr::from_str(&format!("{}_stoch_d", base_name)), d_vec);
     
     Ok((PySeries(k_series), PySeries(d_series)))
 }
@@ -1972,33 +3092,53 @@ pub fn stochf(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    // 计算FastK
-    let mut fastk_values = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut fastk_values = vec![f64::NAN; len];
     
-    for i in k_period - 1..close_vals.len() {
-        let slice_start = i + 1 - k_period;
-        let high_slice = &high_vals[slice_start..=i];
-        let low_slice = &low_vals[slice_start..=i];
+    // 零拷贝 + tight loop 计算FastK
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in k_period - 1..len {
+            let start = i + 1 - k_period;
+            
+            let mut highest = h_arr[start];
+            let mut lowest = l_arr[start];
+            for j in start + 1..=i {
+                if h_arr[j] > highest { highest = h_arr[j]; }
+                if l_arr[j] < lowest { lowest = l_arr[j]; }
+            }
+            
+            let range = highest - lowest;
+            if range != 0.0 {
+                fastk_values[i] = ((c_arr[i] - lowest) / range) * 100.0;
+            }
+        }
+    } else {
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        let highest = high_slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let lowest = low_slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        
-        if highest != lowest {
-            fastk_values[i] = Some(((close_vals[i] - lowest) / (highest - lowest)) * 100.0);
+        for i in k_period - 1..len {
+            let start = i + 1 - k_period;
+            let highest = high_vec[start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let lowest = low_vec[start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            
+            if highest != lowest {
+                fastk_values[i] = ((close_vec[i] - lowest) / (highest - lowest)) * 100.0;
+            }
         }
     }
     
     // 计算FastD (FastK的移动平均)
-    let fastk_vals_for_d: Vec<f64> = fastk_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
-    let fastd_values = calculate_ma(&fastk_vals_for_d, d_period, MAType::SMA);
+    let fastd_values = calculate_ma(&fastk_values, d_period, MAType::SMA);
+    let fastd_vec: Vec<f64> = fastd_values.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
     
     let base_name = h.name();
     let fastk_series = Series::new(PlSmallStr::from_str(&format!("{}_stochf_k", base_name)), fastk_values);
-    let fastd_series = Series::new(PlSmallStr::from_str(&format!("{}_stochf_d", base_name)), fastd_values);
+    let fastd_series = Series::new(PlSmallStr::from_str(&format!("{}_stochf_d", base_name)), fastd_vec);
     
     Ok((PySeries(fastk_series), PySeries(fastd_series)))
 }
@@ -2131,69 +3271,180 @@ pub fn ultosc(high: PySeries, low: PySeries, close: PySeries, period1: usize, pe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
+    let low_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
+    let close_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
     
-    let ultosc_values = {
-        let mut result = vec![None; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    // Sort periods: longest to shortest (TA-Lib style)
+    let max_period = period1.max(period2).max(period3);
+    
+    if len <= max_period {
+        let result_series = Series::new(c.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // Zero-copy optimization
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        // Pre-compute BP and TR for all bars (TA-Lib CALC_TERMS macro pattern)
+        let mut bp = vec![0.0; len];
+        let mut tr = vec![0.0; len];
         
-        if close_vals.len() >= period3 + 1 {
-            for i in period3..close_vals.len() {
-                // 计算买压力(BP)和真实波幅(TR)
-                let mut bp1 = 0.0; let mut tr1 = 0.0;
-                let mut bp2 = 0.0; let mut tr2 = 0.0;
-                let mut bp3 = 0.0; let mut tr3 = 0.0;
-                
-                // Period 1
-                for j in (i + 1 - period1)..=i {
-                    if j > 0 {
-                        let prev_close = close_vals[j - 1];
-                        let bp = close_vals[j] - low_vals[j].min(prev_close);
-                        let tr = high_vals[j].max(prev_close) - low_vals[j].min(prev_close);
-                        bp1 += bp;
-                        tr1 += tr;
-                    }
-                }
-                
-                // Period 2
-                for j in (i + 1 - period2)..=i {
-                    if j > 0 {
-                        let prev_close = close_vals[j - 1];
-                        let bp = close_vals[j] - low_vals[j].min(prev_close);
-                        let tr = high_vals[j].max(prev_close) - low_vals[j].min(prev_close);
-                        bp2 += bp;
-                        tr2 += tr;
-                    }
-                }
-                
-                // Period 3
-                for j in (i + 1 - period3)..=i {
-                    if j > 0 {
-                        let prev_close = close_vals[j - 1];
-                        let bp = close_vals[j] - low_vals[j].min(prev_close);
-                        let tr = high_vals[j].max(prev_close) - low_vals[j].min(prev_close);
-                        bp3 += bp;
-                        tr3 += tr;
-                    }
-                }
-                
-                // 计算UltiMate Oscillator
-                if tr1 > 0.0 && tr2 > 0.0 && tr3 > 0.0 {
-                    let avg1 = bp1 / tr1;
-                    let avg2 = bp2 / tr2;
-                    let avg3 = bp3 / tr3;
-                    
-                    result[i] = Some(100.0 * ((4.0 * avg1) + (2.0 * avg2) + avg3) / 7.0);
-                }
-            }
+        for i in 1..len {
+            let true_low = l_arr[i].min(c_arr[i - 1]);
+            bp[i] = c_arr[i] - true_low;
+            
+            // True Range: max(H-L, |H-prev_close|, |L-prev_close|)
+            let mut true_range = h_arr[i] - l_arr[i];
+            let temp = (c_arr[i - 1] - h_arr[i]).abs();
+            if temp > true_range { true_range = temp; }
+            let temp = (c_arr[i - 1] - l_arr[i]).abs();
+            if temp > true_range { true_range = temp; }
+            
+            tr[i] = true_range;
         }
         
-        result
-    };
+        // Initialize running totals for the longest period (TA-Lib PRIME_TOTALS pattern)
+        let mut bp1_total = 0.0;
+        let mut tr1_total = 0.0;
+        let mut bp2_total = 0.0;
+        let mut tr2_total = 0.0;
+        let mut bp3_total = 0.0;
+        let mut tr3_total = 0.0;
+        
+        let start_idx = max_period;
+        
+        // Prime the first windows
+        for i in (start_idx - period1 + 1)..start_idx {
+            bp1_total += bp[i];
+            tr1_total += tr[i];
+        }
+        for i in (start_idx - period2 + 1)..start_idx {
+            bp2_total += bp[i];
+            tr2_total += tr[i];
+        }
+        for i in (start_idx - period3 + 1)..start_idx {
+            bp3_total += bp[i];
+            tr3_total += tr[i];
+        }
+        
+        // Sliding window calculation (TA-Lib main loop pattern)
+        let mut trailing_idx1 = start_idx - period1 + 1;
+        let mut trailing_idx2 = start_idx - period2 + 1;
+        let mut trailing_idx3 = start_idx - period3 + 1;
+        
+        for today in start_idx..len {
+            // Add current bar to all windows
+            bp1_total += bp[today];
+            tr1_total += tr[today];
+            bp2_total += bp[today];
+            tr2_total += tr[today];
+            bp3_total += bp[today];
+            tr3_total += tr[today];
+            
+            // Calculate Ultimate Oscillator
+            let mut output = 0.0;
+            if tr1_total > 0.0 { output += 4.0 * (bp1_total / tr1_total); }
+            if tr2_total > 0.0 { output += 2.0 * (bp2_total / tr2_total); }
+            if tr3_total > 0.0 { output += bp3_total / tr3_total; }
+            
+            result[today] = Some(100.0 * (output / 7.0));
+            
+            // Remove oldest bars from each window
+            bp1_total -= bp[trailing_idx1];
+            tr1_total -= tr[trailing_idx1];
+            bp2_total -= bp[trailing_idx2];
+            tr2_total -= tr[trailing_idx2];
+            bp3_total -= bp[trailing_idx3];
+            tr3_total -= tr[trailing_idx3];
+            
+            trailing_idx1 += 1;
+            trailing_idx2 += 1;
+            trailing_idx3 += 1;
+        }
+    } else {
+        // Fallback: same algorithm with Vec
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut bp = vec![0.0; len];
+        let mut tr = vec![0.0; len];
+        
+        for i in 1..len {
+            let true_low = low_vec[i].min(close_vec[i - 1]);
+            bp[i] = close_vec[i] - true_low;
+            
+            let mut true_range = high_vec[i] - low_vec[i];
+            let temp = (close_vec[i - 1] - high_vec[i]).abs();
+            if temp > true_range { true_range = temp; }
+            let temp = (close_vec[i - 1] - low_vec[i]).abs();
+            if temp > true_range { true_range = temp; }
+            
+            tr[i] = true_range;
+        }
+        
+        let mut bp1_total = 0.0;
+        let mut tr1_total = 0.0;
+        let mut bp2_total = 0.0;
+        let mut tr2_total = 0.0;
+        let mut bp3_total = 0.0;
+        let mut tr3_total = 0.0;
+        
+        let start_idx = max_period;
+        
+        for i in (start_idx - period1 + 1)..start_idx {
+            bp1_total += bp[i];
+            tr1_total += tr[i];
+        }
+        for i in (start_idx - period2 + 1)..start_idx {
+            bp2_total += bp[i];
+            tr2_total += tr[i];
+        }
+        for i in (start_idx - period3 + 1)..start_idx {
+            bp3_total += bp[i];
+            tr3_total += tr[i];
+        }
+        
+        let mut trailing_idx1 = start_idx - period1 + 1;
+        let mut trailing_idx2 = start_idx - period2 + 1;
+        let mut trailing_idx3 = start_idx - period3 + 1;
+        
+        for today in start_idx..len {
+            bp1_total += bp[today];
+            tr1_total += tr[today];
+            bp2_total += bp[today];
+            tr2_total += tr[today];
+            bp3_total += bp[today];
+            tr3_total += tr[today];
+            
+            let mut output = 0.0;
+            if tr1_total > 0.0 { output += 4.0 * (bp1_total / tr1_total); }
+            if tr2_total > 0.0 { output += 2.0 * (bp2_total / tr2_total); }
+            if tr3_total > 0.0 { output += bp3_total / tr3_total; }
+            
+            result[today] = Some(100.0 * (output / 7.0));
+            
+            bp1_total -= bp[trailing_idx1];
+            tr1_total -= tr[trailing_idx1];
+            bp2_total -= bp[trailing_idx2];
+            tr2_total -= tr[trailing_idx2];
+            bp3_total -= bp[trailing_idx3];
+            tr3_total -= tr[trailing_idx3];
+            
+            trailing_idx1 += 1;
+            trailing_idx2 += 1;
+            trailing_idx3 += 1;
+        }
+    }
     
-    let result = Series::new(c.name().clone(), ultosc_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 威廉指标 (WILLR)
@@ -2204,30 +3455,52 @@ pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> P
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
+    let low_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
+    let close_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
     
-    let willr_values = {
-        let mut result = vec![None; close_vals.len()];
-        
-        for i in period - 1..close_vals.len() {
-            let slice_start = i + 1 - period;
-            let high_slice = &high_vals[slice_start..=i];
-            let low_slice = &low_vals[slice_start..=i];
+    let len = close_vals.len();
+    let mut output = vec![f64::NAN; len];
+    
+    // 零拷贝 + tight loop
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in period - 1..len {
+            let start = i + 1 - period;
             
-            let highest = high_slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            let lowest = low_slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            // 查找窗口内最高/最低价
+            let mut highest = h_arr[start];
+            let mut lowest = l_arr[start];
+            for j in start + 1..=i {
+                if h_arr[j] > highest { highest = h_arr[j]; }
+                if l_arr[j] < lowest { lowest = l_arr[j]; }
+            }
             
-            if highest != lowest {
-                result[i] = Some(((highest - close_vals[i]) / (highest - lowest)) * -100.0);
+            let range = highest - lowest;
+            if range != 0.0 {
+                output[i] = ((highest - c_arr[i]) / range) * -100.0;
             }
         }
+    } else {
+        // fallback
+        let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        for i in period - 1..len {
+            let start = i + 1 - period;
+            let highest = high_vec[start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let lowest = low_vec[start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            
+            if highest != lowest {
+                output[i] = ((highest - close_vec[i]) / (highest - lowest)) * -100.0;
+            }
+        }
+    }
     
-    let result = Series::new(c.name().clone(), willr_values);
+    let result = Series::new(c.name().clone(), output);
     Ok(PySeries(result))
 }
 
@@ -2235,7 +3508,7 @@ pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> P
 // 成交量指标 (Volume Indicators) - 成交量相关指标
 // ====================================================================
 
-/// 累积/派发线 (AD)
+/// 累积/派发线 (AD) - 零拷贝优化版本
 #[pyfunction]
 #[pyo3(signature = (high, low, close, volume))]
 pub fn ad(high: PySeries, low: PySeries, close: PySeries, volume: PySeries) -> PyResult<PySeries> {
@@ -2244,36 +3517,64 @@ pub fn ad(high: PySeries, low: PySeries, close: PySeries, volume: PySeries) -> P
     let c: Series = close.into();
     let v: Series = volume.into();
     
+    let c_name = c.name().clone();
+    
     // 将 volume 转换为 f64 类型
     let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+        v.cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
     } else {
         v
     };
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let volume_vals: Vec<f64> = v_f64.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
+    let low_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
+    let close_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
+    let volume_vals = v_f64.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
     
-    let ad_values = {
-        let mut result = vec![0.0; close_vals.len()];
-        let mut cumulative_ad = 0.0;
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
+    
+    // 零拷贝访问 + tight loop
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr), Ok(v_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice(), volume_vals.cont_slice()) {
         
-        for i in 0..close_vals.len() {
-            let hl_diff = high_vals[i] - low_vals[i];
+        let mut cumsum = 0.0;
+        
+        // Tight loop: CLV计算 + 累加
+        for i in 0..len {
+            let hl_diff = h_arr[i] - l_arr[i];
             if hl_diff > 0.0 {
-                let clv = ((close_vals[i] - low_vals[i]) - (high_vals[i] - close_vals[i])) / hl_diff;
-                cumulative_ad += clv * volume_vals[i];
+                // CLV = ((C - L) - (H - C)) / (H - L)
+                let clv = ((c_arr[i] - l_arr[i]) - (h_arr[i] - c_arr[i])) / hl_diff;
+                cumsum += clv * v_arr[i];
             }
-            result[i] = cumulative_ad;
+            result[i] = cumsum;
         }
+    } else {
+        // Fallback
+        let h_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let l_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let c_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let v_vec: Vec<f64> = volume_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        let mut cumsum = 0.0;
+        
+        for i in 0..len {
+            let hl_diff = h_vec[i] - l_vec[i];
+            if hl_diff > 0.0 {
+                let clv = ((c_vec[i] - l_vec[i]) - (h_vec[i] - c_vec[i])) / hl_diff;
+                cumsum += clv * v_vec[i];
+            }
+            result[i] = cumsum;
+        }
+    }
     
-    let result = Series::new(c.name().clone(), ad_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c_name, result)))
 }
 
 /// 累积/派发摆动指标 (ADOSC)
@@ -2285,6 +3586,8 @@ pub fn adosc(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, f
     let c: Series = close.into();
     let v: Series = volume.into();
     
+    let c_name = c.name().clone();
+    
     // 将 volume 转换为 f64 类型
     let v_f64 = if v.dtype() == &DataType::Int64 {
         v.cast(&DataType::Float64).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
@@ -2292,46 +3595,90 @@ pub fn adosc(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, f
         v
     };
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let volume_vals: Vec<f64> = v_f64.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
+    let low_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
+    let close_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
+    let volume_vals = v_f64.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
     
-    // 先计算AD线
-    let ad_values = {
-        let mut result = vec![0.0; close_vals.len()];
-        let mut cumulative_ad = 0.0;
+    let len = close_vals.len();
+    let mut result = vec![None; len];
+    
+    // Zero-copy optimization
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr), Ok(v_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice(), volume_vals.cont_slice()) {
         
-        for i in 0..close_vals.len() {
-            let hl_diff = high_vals[i] - low_vals[i];
+        // Step 1: 计算AD线（内联，避免额外内存）
+        let mut ad_values = vec![0.0; len];
+        let mut cumsum = 0.0;
+        
+        for i in 0..len {
+            let hl_diff = h_arr[i] - l_arr[i];
             if hl_diff > 0.0 {
-                let clv = ((close_vals[i] - low_vals[i]) - (high_vals[i] - close_vals[i])) / hl_diff;
-                cumulative_ad += clv * volume_vals[i];
+                let clv = ((c_arr[i] - l_arr[i]) - (h_arr[i] - c_arr[i])) / hl_diff;
+                cumsum += clv * v_arr[i];
             }
-            result[i] = cumulative_ad;
+            ad_values[i] = cumsum;
         }
         
-        result
-    };
-    
-    // 计算AD线的快线和慢线EMA
-    let fast_ema_values = calculate_ma(&ad_values, fast_period, MAType::EMA);
-    let slow_ema_values = calculate_ma(&ad_values, slow_period, MAType::EMA);
-    
-    let adosc_values: Vec<Option<f64>> = fast_ema_values.iter().zip(slow_ema_values.iter())
-        .map(|(&fast, &slow)| {
-            match (fast, slow) {
-                (Some(f), Some(s)) => Some(f - s),
-                _ => None,
+        // Step 2: 计算EMA（内联优化）
+        let fast_k = 2.0 / (fast_period as f64 + 1.0);
+        let slow_k = 2.0 / (slow_period as f64 + 1.0);
+        
+        let mut fast_ema = ad_values[0];
+        let mut slow_ema = ad_values[0];
+        
+        for i in 1..len {
+            fast_ema = ad_values[i] * fast_k + fast_ema * (1.0 - fast_k);
+            slow_ema = ad_values[i] * slow_k + slow_ema * (1.0 - slow_k);
+            
+            // 从慢线周期开始输出
+            if i >= slow_period - 1 {
+                result[i] = Some(fast_ema - slow_ema);
             }
-        })
-        .collect();
+        }
+    } else {
+        // Fallback
+        let h_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let l_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let c_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let v_vec: Vec<f64> = volume_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        
+        let mut ad_values = vec![0.0; len];
+        let mut cumsum = 0.0;
+        
+        for i in 0..len {
+            let hl_diff = h_vec[i] - l_vec[i];
+            if hl_diff > 0.0 {
+                let clv = ((c_vec[i] - l_vec[i]) - (h_vec[i] - c_vec[i])) / hl_diff;
+                cumsum += clv * v_vec[i];
+            }
+            ad_values[i] = cumsum;
+        }
+        
+        let fast_k = 2.0 / (fast_period as f64 + 1.0);
+        let slow_k = 2.0 / (slow_period as f64 + 1.0);
+        
+        let mut fast_ema = ad_values[0];
+        let mut slow_ema = ad_values[0];
+        
+        for i in 1..len {
+            fast_ema = ad_values[i] * fast_k + fast_ema * (1.0 - fast_k);
+            slow_ema = ad_values[i] * slow_k + slow_ema * (1.0 - slow_k);
+            
+            if i >= slow_period - 1 {
+                result[i] = Some(fast_ema - slow_ema);
+            }
+        }
+    }
     
-    let result = Series::new(c.name().clone(), adosc_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c_name, result)))
 }
 
-/// 能量潮指标 (OBV)
+/// 能量潮指标 (OBV) - 零拷贝优化版本
 #[pyfunction]
 #[pyo3(signature = (close, volume))]
 pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
@@ -2340,37 +3687,54 @@ pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
     
     // 将 volume 转换为 f64 类型
     let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+        v.cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
     } else {
         v
     };
     
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let volume_vals: Vec<f64> = v_f64.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let close_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
+    let volume_vals = v_f64.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
     
-    let obv_values = {
-        let mut result = vec![0.0; close_vals.len()];
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
+    
+    if len == 0 {
+        return Ok(PySeries(Series::new(c.name().clone(), result)));
+    }
+    
+    // 零拷贝访问 + 无分支优化
+    if let (Ok(c_arr), Ok(v_arr)) = (close_vals.cont_slice(), volume_vals.cont_slice()) {
+        result[0] = v_arr[0];
+        let mut obv = result[0];
         
-        if !close_vals.is_empty() {
-            let mut obv = volume_vals[0];
-            result[0] = obv;
-            
-            for i in 1..close_vals.len() {
-                if close_vals[i] > close_vals[i - 1] {
-                    obv += volume_vals[i];
-                } else if close_vals[i] < close_vals[i - 1] {
-                    obv -= volume_vals[i];
-                }
-                // 如果价格不变，OBV保持不变
-                result[i] = obv;
-            }
+        // 无分支优化: 使用符号函数消除分支
+        for i in 1..len {
+            let diff = c_arr[i] - c_arr[i - 1];
+            // signum: 1.0 if diff > 0, -1.0 if diff < 0, 0.0 if diff == 0
+            let sign = if diff > 0.0 { 1.0 } else if diff < 0.0 { -1.0 } else { 0.0 };
+            obv += sign * v_arr[i];
+            result[i] = obv;
         }
+    } else {
+        // Fallback
+        let close_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let volume_vec: Vec<f64> = volume_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        result
-    };
+        result[0] = volume_vec[0];
+        let mut obv = result[0];
+        
+        for i in 1..len {
+            let diff = close_vec[i] - close_vec[i - 1];
+            let sign = if diff > 0.0 { 1.0 } else if diff < 0.0 { -1.0 } else { 0.0 };
+            obv += sign * volume_vec[i];
+            result[i] = obv;
+        }
+    }
     
-    let result = Series::new(c.name().clone(), obv_values);
-    Ok(PySeries(result))
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 // ============================================================================
@@ -2385,32 +3749,65 @@ pub fn trange(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeri
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let trange_values = {
-        let mut result = vec![None; close_vals.len()];
-        
+    let len = close_vals.len();
+    let mut result = vec![f64::NAN; len];
+    
+    if len == 0 {
+        let result_series = Series::new(c.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 优化: 零拷贝路径 + 减少函数调用
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         // 第一个值就是 high - low
-        if !close_vals.is_empty() {
-            result[0] = Some(high_vals[0] - low_vals[0]);
-        }
+        result[0] = h_arr[0] - l_arr[0];
         
-        // 从第二个值开始计算真实波幅
-        for i in 1..close_vals.len() {
-            let hl = high_vals[i] - low_vals[i];
-            let hc = (high_vals[i] - close_vals[i - 1]).abs();
-            let lc = (low_vals[i] - close_vals[i - 1]).abs();
+        // 紧密循环: 内联abs和max运算
+        for i in 1..len {
+            let h = h_arr[i];
+            let l = l_arr[i];
+            let c_prev = c_arr[i - 1];
             
-            result[i] = Some(hl.max(hc).max(lc));
+            let hl = h - l;
+            let hc_diff = h - c_prev;
+            let lc_diff = l - c_prev;
+            
+            // 内联abs: 使用位运算或条件移动
+            let hc = if hc_diff >= 0.0 { hc_diff } else { -hc_diff };
+            let lc = if lc_diff >= 0.0 { lc_diff } else { -lc_diff };
+            
+            // 三者取最大
+            let max_hl_hc = if hl > hc { hl } else { hc };
+            result[i] = if max_hl_hc > lc { max_hl_hc } else { lc };
         }
+    } else {
+        // 后备路径
+        result[0] = high_vals.get(0).unwrap_or(0.0) - low_vals.get(0).unwrap_or(0.0);
         
-        result
-    };
+        for i in 1..len {
+            let h = high_vals.get(i).unwrap_or(0.0);
+            let l = low_vals.get(i).unwrap_or(0.0);
+            let c_prev = close_vals.get(i - 1).unwrap_or(0.0);
+            
+            let hl = h - l;
+            let hc_diff = h - c_prev;
+            let lc_diff = l - c_prev;
+            
+            let hc = if hc_diff >= 0.0 { hc_diff } else { -hc_diff };
+            let lc = if lc_diff >= 0.0 { lc_diff } else { -lc_diff };
+            
+            let max_hl_hc = if hl > hc { hl } else { hc };
+            result[i] = if max_hl_hc > lc { max_hl_hc } else { lc };
+        }
+    }
     
-    let result = Series::new(c.name().clone(), trange_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 // ====================================================================
@@ -2425,14 +3822,58 @@ pub fn atr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    // 优化: 使用零拷贝访问,避免Vec<f64>分配
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let atr_values = calculate_atr(&high_vals, &low_vals, &close_vals, period);
-    let result = Series::new(c.name().clone(), atr_values);
+    let len = high_vals.len();
+    let mut result = vec![f64::NAN; len];
     
-    Ok(PySeries(result))
+    if period == 0 || period >= len {
+        let result_series = Series::new(c.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 尝试零拷贝路径
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        
+        // 直接在一次遍历中计算TR和累积ATR
+        let first_tr = h_arr[0] - l_arr[0];
+        let mut tr_sum = first_tr;
+        
+        // 累积前period个TR值
+        for i in 1..period {
+            let tr1 = h_arr[i] - l_arr[i];
+            let tr2 = (h_arr[i] - c_arr[i - 1]).abs();
+            let tr3 = (l_arr[i] - c_arr[i - 1]).abs();
+            tr_sum += tr1.max(tr2).max(tr3);
+        }
+        
+        result[period - 1] = tr_sum / period as f64;
+        
+        // Wilder平滑
+        let smoothing_factor = 1.0 / period as f64;
+        let retention_factor = (period - 1) as f64 / period as f64;
+        
+        for i in period..len {
+            let tr1 = h_arr[i] - l_arr[i];
+            let tr2 = (h_arr[i] - c_arr[i - 1]).abs();
+            let tr3 = (l_arr[i] - c_arr[i - 1]).abs();
+            let tr = tr1.max(tr2).max(tr3);
+            result[i] = result[i - 1] * retention_factor + tr * smoothing_factor;
+        }
+    } else {
+        // 后备路径: 使用Vec
+        let high_vals_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let low_vals_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let close_vals_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        result = calculate_atr(&high_vals_vec, &low_vals_vec, &close_vals_vec, period);
+    }
+    
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 /// 标准化平均真实波幅 (NATR)
@@ -2443,28 +3884,72 @@ pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
     let l: Series = low.into();
     let c: Series = close.into();
     
-    // 先计算ATR
-    let atr_result = atr(PySeries(h.clone()), PySeries(l.clone()), PySeries(c.clone()), period)?;
-    let atr_series: Series = atr_result.into();
-    let atr_vals: Vec<f64> = atr_series.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    // 优化: 直接计算ATR和NATR,避免中间Series创建
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
     
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let len = high_vals.len();
+    let mut result = vec![f64::NAN; len];
     
-    let natr_values = {
-        let mut result = vec![None; close_vals.len()];
+    if period == 0 || period >= len {
+        let result_series = Series::new(c.name().clone(), result);
+        return Ok(PySeries(result_series));
+    }
+    
+    // 尝试零拷贝路径
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
-        for i in 0..atr_vals.len() {
-            if atr_vals[i] > 0.0 && close_vals[i] > 0.0 {
-                // NATR = (ATR / Close) * 100
-                result[i] = Some((atr_vals[i] / close_vals[i]) * 100.0);
-            }
+        // 计算ATR值(与atr函数相同的逻辑)
+        let first_tr = h_arr[0] - l_arr[0];
+        let mut tr_sum = first_tr;
+        
+        for i in 1..period {
+            let tr1 = h_arr[i] - l_arr[i];
+            let tr2 = (h_arr[i] - c_arr[i - 1]).abs();
+            let tr3 = (l_arr[i] - c_arr[i - 1]).abs();
+            tr_sum += tr1.max(tr2).max(tr3);
         }
         
-        result
-    };
+        let mut atr = tr_sum / period as f64;
+        if c_arr[period - 1] > 0.0 {
+            result[period - 1] = (atr / c_arr[period - 1]) * 100.0;
+        }
+        
+        // Wilder平滑 + 立即计算NATR
+        let smoothing_factor = 1.0 / period as f64;
+        let retention_factor = (period - 1) as f64 / period as f64;
+        
+        for i in period..len {
+            let tr1 = h_arr[i] - l_arr[i];
+            let tr2 = (h_arr[i] - c_arr[i - 1]).abs();
+            let tr3 = (l_arr[i] - c_arr[i - 1]).abs();
+            let tr = tr1.max(tr2).max(tr3);
+            atr = atr * retention_factor + tr * smoothing_factor;
+            
+            // 立即计算NATR: (ATR / Close) * 100
+            if c_arr[i] > 0.0 {
+                result[i] = (atr / c_arr[i]) * 100.0;
+            }
+        }
+    } else {
+        // 后备路径: 先计算ATR,再计算NATR
+        let atr_result = atr(PySeries(h.clone()), PySeries(l.clone()), PySeries(c.clone()), period)?;
+        let atr_series: Series = atr_result.into();
+        let atr_vals = atr_series.f64().unwrap();
+        
+        for i in 0..len {
+            if let (Some(atr_val), Some(close_val)) = (atr_vals.get(i), close_vals.get(i)) {
+                if !atr_val.is_nan() && close_val > 0.0 {
+                    result[i] = (atr_val / close_val) * 100.0;
+                }
+            }
+        }
+    }
     
-    let result = Series::new(c.name().clone(), natr_values);
-    Ok(PySeries(result))
+    let result_series = Series::new(c.name().clone(), result);
+    Ok(PySeries(result_series))
 }
 
 // ============================================================================
@@ -2482,38 +3967,52 @@ pub fn avgprice(open: PySeries, high: PySeries, low: PySeries, close: PySeries) 
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let open_vals = o.f64().unwrap();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
     
-    let avgprice_values: Vec<f64> = (0..close_vals.len()).map(|i| {
-        (open_vals[i] + high_vals[i] + low_vals[i] + close_vals[i]) / 4.0
-    }).collect();
-    
-    let result = Series::new(c.name().clone(), avgprice_values);
-    Ok(PySeries(result))
+    if let (Ok(o_arr), Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (open_vals.cont_slice(), high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in 0..len {
+            result[i] = (o_arr[i] + h_arr[i] + l_arr[i] + c_arr[i]) * 0.25;
+        }
+    } else {
+        for i in 0..len {
+            result[i] = (open_vals.get(i).unwrap_or(0.0) + high_vals.get(i).unwrap_or(0.0) + 
+                        low_vals.get(i).unwrap_or(0.0) + close_vals.get(i).unwrap_or(0.0)) * 0.25;
+        }
+    }
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
-/// 中间价格 (MEDPRICE) - SIMD优化版本
+/// 中间价格 (MEDPRICE) - 简洁优化
 #[pyfunction]
 #[pyo3(signature = (high, low))]
 pub fn medprice(high: PySeries, low: PySeries) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let len = high_vals.len();
+    let mut result = vec![0.0; len];
     
-    let medprice_values: Vec<f64> = (0..high_vals.len()).map(|i| {
-        (high_vals[i] + low_vals[i]) / 2.0
-    }).collect();
-    
-    let result = Series::new(h.name().clone(), medprice_values);
-    Ok(PySeries(result))
+    if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
+        for i in 0..len {
+            result[i] = (h_arr[i] + l_arr[i]) * 0.5;
+        }
+    } else {
+        for i in 0..len {
+            result[i] = (high_vals.get(i).unwrap_or(0.0) + low_vals.get(i).unwrap_or(0.0)) * 0.5;
+        }
+    }
+    Ok(PySeries(Series::new(h.name().clone(), result)))
 }
 
-/// 典型价格 (TYPPRICE) - SIMD优化版本
+/// 典型价格 (TYPPRICE) - 简洁优化
 #[pyfunction]
 #[pyo3(signature = (high, low, close))]
 pub fn typprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -2521,19 +4020,28 @@ pub fn typprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
+    let one_third = 1.0 / 3.0;
     
-    let typprice_values: Vec<f64> = (0..close_vals.len()).map(|i| {
-        (high_vals[i] + low_vals[i] + close_vals[i]) / 3.0
-    }).collect();
-    
-    let result = Series::new(c.name().clone(), typprice_values);
-    Ok(PySeries(result))
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in 0..len {
+            result[i] = (h_arr[i] + l_arr[i] + c_arr[i]) * one_third;
+        }
+    } else {
+        for i in 0..len {
+            result[i] = (high_vals.get(i).unwrap_or(0.0) + low_vals.get(i).unwrap_or(0.0) + 
+                        close_vals.get(i).unwrap_or(0.0)) * one_third;
+        }
+    }
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
-/// 加权收盘价 (WCLPRICE)
+/// 加权收盘价 (WCLPRICE) - 简洁优化
 #[pyfunction]
 #[pyo3(signature = (high, low, close))]
 pub fn wclprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -2541,16 +4049,24 @@ pub fn wclprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let high_vals = h.f64().unwrap();
+    let low_vals = l.f64().unwrap();
+    let close_vals = c.f64().unwrap();
+    let len = close_vals.len();
+    let mut result = vec![0.0; len];
     
-    let wclprice_values: Vec<f64> = (0..close_vals.len()).map(|i| {
-        (high_vals[i] + low_vals[i] + 2.0 * close_vals[i]) / 4.0
-    }).collect();
-    
-    let result = Series::new(c.name().clone(), wclprice_values);
-    Ok(PySeries(result))
+    if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
+        (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
+        for i in 0..len {
+            result[i] = (h_arr[i] + l_arr[i] + c_arr[i] * 2.0) * 0.25;
+        }
+    } else {
+        for i in 0..len {
+            let c_val = close_vals.get(i).unwrap_or(0.0);
+            result[i] = (high_vals.get(i).unwrap_or(0.0) + low_vals.get(i).unwrap_or(0.0) + c_val * 2.0) * 0.25;
+        }
+    }
+    Ok(PySeries(Series::new(c.name().clone(), result)))
 }
 
 // ============================================================================
