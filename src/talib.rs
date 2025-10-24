@@ -13,10 +13,9 @@ pub enum MAType {
     EMA, // 指数移动平均
 }
 
-/// 通用移动平均计算函数 - 手写 tight loop 优化（模拟 TA-Lib）
+/// 通用移动平均计算函数
 /// 
-/// 使用零拷贝访问和滑动窗口增量更新，显著提升性能
-/// 所有依赖此函数的函数（DEMA, TEMA, MACD, BBANDS）都将自动受益
+/// 支持多种移动平均类型（SMA, EMA, DEMA, TEMA 等）
 pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Option<f64>> {
     let len = values.len();
     let mut result = vec![None; len];
@@ -27,7 +26,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
     
     match ma_type {
         MAType::SMA => {
-            // Tight loop 滑动窗口（模拟 TA-Lib）
+            // 滑动窗口计算
             let mut period_total = 0.0;
             let lookback = period - 1;
             
@@ -36,7 +35,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
                 period_total += values[i];
             }
             
-            // 滑动窗口增量更新（O(1) per step）
+            // 滑动窗口增量更新
             let mut trailing_idx = 0;
             for i in lookback..len {
                 period_total += values[i];              // 加入新值
@@ -46,7 +45,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
             }
         },
         MAType::EMA => {
-            // Tight loop 指数平滑（模拟 TA-Lib）
+            // 指数平滑计算
             let alpha = 2.0 / (period as f64 + 1.0);
             let one_minus_alpha = 1.0 - alpha;
             
@@ -58,7 +57,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
             let mut ema = sum / period as f64;
             result[period - 1] = Some(ema);
             
-            // Tight loop: 指数平滑更新
+            // 指数平滑更新
             for i in period..len {
                 ema = alpha * values[i] + one_minus_alpha * ema;
                 result[i] = Some(ema);
@@ -69,7 +68,7 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
     result
 }
 
-// 高效的RSI计算函数
+// RSI计算函数
 fn calculate_rsi(values: &[f64], period: usize) -> Vec<f64> {
     let len = values.len();
     let mut result = vec![f64::NAN; len];
@@ -115,7 +114,7 @@ fn calculate_rsi(values: &[f64], period: usize) -> Vec<f64> {
     result
 }
 
-// 高效的ATR计算函数
+// ATR计算函数
 fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let len = high.len();
     let mut result = vec![f64::NAN; len];
@@ -142,7 +141,6 @@ fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec
     result[period - 1] = tr_sum / period as f64;
     
     // 使用Wilder的平滑方法: ATR = ((period-1)*prev_ATR + current_TR) / period
-    // 优化: 展开为 ATR = prev_ATR + (current_TR - prev_ATR) / period
     let smoothing_factor = 1.0 / period as f64;
     let retention_factor = (period - 1) as f64 / period as f64;
     
@@ -152,7 +150,7 @@ fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec
         let tr3 = (low[i] - close[i - 1]).abs();
         let tr = tr1.max(tr2).max(tr3);
         
-        // 使用增量更新: prev_ATR * retention + tr * smoothing
+        // 增量更新
         result[i] = result[i - 1] * retention_factor + tr * smoothing_factor;
     }
     
@@ -176,15 +174,12 @@ fn is_short_body(body: f64, range: f64) -> bool {
     body < range * 0.3
 }
 
-fn is_bullish(open: f64, close: f64) -> bool {
-    close > open
-}
-
 fn is_doji_body(body_size: f64, range: f64) -> bool {
     body_size < range * 0.1
 }
 
-/// 布林带 (BBAND) - 手写 tight loop 优化版本
+/// 布林带 (BBAND)
+/// 计算上轨、中轨、下轨
 #[pyfunction]
 #[pyo3(signature = (series, period=20, std_dev=2.0))]
 pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySeries, PySeries, PySeries)> {
@@ -206,7 +201,7 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         ));
     }
     
-    // 零拷贝访问（快速路径）
+    // 快速路径：连续内存访问
     if let Ok(input) = values.cont_slice() {
         let lookback = period - 1;
         let period_f64 = period as f64;
@@ -229,7 +224,7 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         middle_out[lookback] = sma;
         lower_out[lookback] = sma - std_dev * std;
         
-        // 滑动窗口：O(1) per step
+        // 滑动窗口
         for i in period..len {
             let old_val = input[i - period];
             let new_val = input[i];
@@ -271,7 +266,7 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         middle_out[lookback] = sma;
         lower_out[lookback] = sma - std_dev * std;
         
-        // 滑动窗口：O(1) per step
+        // 滑动窗口
         for i in period..len {
             let old_val = vec_values[i - period];
             let new_val = vec_values[i];
@@ -324,7 +319,7 @@ pub fn dema(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result))
 }
 
-/// 指数移动平均线 (EMA) - 手写 tight loop 优化（模拟 TA-Lib）
+/// 指数移动平均线 (EMA)
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -339,7 +334,7 @@ pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
         return Ok(PySeries(Series::new(s.name().clone(), output)));
     }
     
-    // 零拷贝访问底层数组（快速路径）
+    // 快速路径：连续内存访问
     if let Ok(input) = values.cont_slice() {
         let alpha = 2.0 / (period + 1) as f64;
         let one_minus_alpha = 1.0 - alpha;
@@ -352,7 +347,7 @@ pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
         let mut ema = sum / period as f64;
         output[period - 1] = ema;
         
-        // Tight loop: 指数平滑计算
+        // 指数平滑计算
         for i in period..len {
             ema = alpha * input[i] + one_minus_alpha * ema;
             output[i] = ema;
@@ -661,7 +656,7 @@ pub fn mavp(series: PySeries, periods: PySeries, min_period: usize, max_period: 
     Ok(PySeries(result))
 }
 
-/// 简单移动平均线 (SMA) - 手写滑动窗口优化（模拟 TA-Lib tight loop）
+/// 简单移动平均线 (SMA)
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn sma(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -676,18 +671,18 @@ pub fn sma(series: PySeries, period: usize) -> PyResult<PySeries> {
         return Ok(PySeries(Series::new(s.name().clone(), output)));
     }
     
-    // 尝试零拷贝访问连续数组（最快路径）
+    // 快速路径：连续内存访问
     if let Ok(input) = values.cont_slice() {
-        // 初始化累加和（模拟 TA-Lib: 累加前 period-1 个值）
+        // 初始化累加和
         let mut period_total = 0.0;
         let lookback = period - 1;
-        let inv_period = 1.0 / period as f64; // 预计算倒数，避免重复除法
+        let inv_period = 1.0 / period as f64;
         
         for i in 0..lookback {
             period_total += input[i];
         }
         
-        // Tight loop: 滑动窗口增量计算（O(1) per step）
+        // 滑动窗口增量计算
         let mut trailing_idx = 0;
         for i in lookback..len {
             period_total += input[i];              // 加入新值
@@ -809,9 +804,8 @@ pub fn tema(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result))
 }
 
-/// 三角移动平均 (TRIMA) - TA-Lib优化算法
+/// 三角移动平均 (TRIMA)
 /// TRIMA(period=4) = (1*a + 2*b + 2*c + 1*d) / 6
-/// 使用滑动窗口避免双重SMA调用
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -892,7 +886,7 @@ pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result))
 }
 
-/// 加权移动平均 (WMA) - 使用优化的滑动窗口算法
+/// 加权移动平均 (WMA)
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -912,7 +906,7 @@ pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
     let inv_weight_sum = 1.0 / weight_sum;
     let period_f64 = period as f64;
     
-    // 零拷贝 + tight loop
+    // 连续内存访问
     if let Ok(input) = values.cont_slice() {
         // 第一个窗口
         let mut weighted_sum = 0.0;
@@ -921,7 +915,7 @@ pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
         output[period - 1] = weighted_sum * inv_weight_sum;
         
-        // 滑动窗口：每次移动更新加权和
+        // 滑动窗口
         let mut sum_values: f64 = input[..period].iter().sum();
         
         for i in period..len {
@@ -968,11 +962,11 @@ pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
         return Ok(PySeries(result_series));
     }
     
-    let inv_2 = 0.5;  // 预计算 1/2
+    let inv_2 = 0.5;
     
-    // 优化: 使用零拷贝访问
+    // 连续内存访问
     if let Ok(arr) = values.cont_slice() {
-        // 滑动窗口优化: 只在窗口滑动时更新max/min
+        // 初始化窗口的最大值和最小值
         let window = &arr[0..period];
         let mut max_val = window[0];
         let mut min_val = window[0];
@@ -984,7 +978,7 @@ pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
         result[period - 1] = (max_val + min_val) * inv_2;
         
-        // 滑动窗口: 检查是否需要更新max/min
+        // 滑动窗口
         for i in period..len {
             let new_val = arr[i];
             let old_val = arr[i - period];
@@ -1052,9 +1046,9 @@ pub fn midprice_hl(high: PySeries, low: PySeries, period: usize) -> PyResult<PyS
         return Ok(PySeries(result_series));
     }
     
-    // 优化: 使用零拷贝访问
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
-        // 零拷贝路径: 直接在窗口中搜索最高价和最低价
+        // 在窗口中搜索最高价和最低价
         for i in (period - 1)..len {
             let start = i + 1 - period;
             let mut max_high = h_arr[start];
@@ -1109,7 +1103,7 @@ pub fn sar(high: PySeries, low: PySeries, acceleration: f64, maximum: f64) -> Py
         return Ok(PySeries(result));
     }
     
-    // 零拷贝路径
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
         // 初始化SAR参数
         let mut sar = l_arr[0];
@@ -1245,7 +1239,7 @@ pub fn sarext(
         return Ok(PySeries(result));
     }
     
-    // 零拷贝路径
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
         // 初始化SAR参数
         let initial_sar = if start_value == 0.0 {
@@ -1397,7 +1391,7 @@ pub fn adx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
         return Ok(PySeries(Series::new(c.name().clone(), result)));
     }
     
-    // 零拷贝路径
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
@@ -1541,7 +1535,7 @@ pub fn adxr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
     
     let mut adxr_values = vec![None; len];
     
-    // 零拷贝路径
+    // 连续内存访问
     if let Ok(adx_arr) = adx_vals.cont_slice() {
         // ADXR = (当前ADX + period周期前的ADX) / 2
         for i in period..len {
@@ -1598,7 +1592,7 @@ pub fn apo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult
     Ok(PySeries(result))
 }
 
-/// 阿隆指标 (AROON) - 优化：零拷贝 + tight loop 位置查找
+/// 阿隆指标 (AROON)
 #[pyfunction]
 #[pyo3(signature = (high, low, period=14))]
 pub fn aroon(high: PySeries, low: PySeries, period: usize) -> PyResult<(PySeries, PySeries)> {
@@ -1901,7 +1895,7 @@ pub fn plus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) ->
         return Ok(PySeries(Series::new(c.name().clone(), result)));
     }
     
-    // 零拷贝优化
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
@@ -2001,7 +1995,7 @@ pub fn minus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -
         return Ok(PySeries(Series::new(c.name().clone(), result)));
     }
     
-    // 零拷贝优化
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
@@ -2226,7 +2220,7 @@ pub fn bop(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> Py
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     
-    // 优化: 零拷贝路径 + 简洁实现
+    // 连续内存访问
     if let (Ok(o_arr), Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (open_vals.cont_slice(), high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
@@ -2322,7 +2316,7 @@ pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
     Ok(PySeries(result))
 }
 
-/// 钱德动量摆动指标 (CMO) - 零拷贝优化版本
+/// 钱德动量摆动指标 (CMO)
 #[pyfunction]
 #[pyo3(signature = (series, period=14))]
 pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
@@ -2338,7 +2332,7 @@ pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
         return Ok(PySeries(result_series));
     }
     
-    // 优化: 零拷贝路径
+    // 连续内存访问
     if let Ok(arr) = values.cont_slice() {
         // 滑动窗口计算
         let mut up_sum = 0.0;
@@ -2432,7 +2426,7 @@ pub fn dx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyRe
         return Ok(PySeries(Series::new(c.name().clone(), result)));
     }
     
-    // 零拷贝优化
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         
@@ -2683,7 +2677,7 @@ pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries,
     Ok((PySeries(dif_series), PySeries(dea_series), PySeries(macd_series)))
 }
 
-/// 资金流量指标 (MFI) - 零拷贝优化版本
+/// 资金流量指标 (MFI)
 #[pyfunction]
 #[pyo3(signature = (high, low, close, volume, period=14))]
 pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, period: usize) -> PyResult<PySeries> {
@@ -2712,7 +2706,7 @@ pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, per
         return Ok(PySeries(result_series));
     }
     
-    // 优化: 零拷贝路径 + 滑动窗口
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr), Ok(v_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice(), volume_vals.cont_slice()) {
         
@@ -3710,7 +3704,7 @@ pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
         result[0] = v_arr[0];
         let mut obv = result[0];
         
-        // 无分支优化: 使用符号函数消除分支
+        // 使用符号函数
         for i in 1..len {
             let diff = c_arr[i] - c_arr[i - 1];
             // signum: 1.0 if diff > 0, -1.0 if diff < 0, 0.0 if diff == 0
@@ -3761,7 +3755,7 @@ pub fn trange(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeri
         return Ok(PySeries(result_series));
     }
     
-    // 优化: 零拷贝路径 + 减少函数调用
+    // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         // 第一个值就是 high - low
@@ -3822,7 +3816,7 @@ pub fn atr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
     let l: Series = low.into();
     let c: Series = close.into();
     
-    // 优化: 使用零拷贝访问,避免Vec<f64>分配
+    // 连续内存访问
     let high_vals = h.f64().unwrap();
     let low_vals = l.f64().unwrap();
     let close_vals = c.f64().unwrap();
@@ -3884,7 +3878,7 @@ pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
     let l: Series = low.into();
     let c: Series = close.into();
     
-    // 优化: 直接计算ATR和NATR,避免中间Series创建
+    // 直接计算ATR和NATR
     let high_vals = h.f64().unwrap();
     let low_vals = l.f64().unwrap();
     let close_vals = c.f64().unwrap();
@@ -4328,7 +4322,7 @@ pub fn ht_trendmode(series: PySeries) -> PyResult<PySeries> {
 // 蜡烛图模式识别 (Candlestick Pattern Recognition) - K线形态
 // ====================================================================
 
-// CDL2CROWS - 两只乌鸦
+// CDL2CROWS - 两只乌鸦 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4337,34 +4331,85 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阳线
-        let day1_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let is_long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：小阴线，开盘在前一日收盘之上，收盘在前一日实体内
-        let day2_bearish = !is_bullish(open_vals[i-1], close_vals[i-1]);
-        let gap_up = open_vals[i-1] > close_vals[i-2];
-        let close_in_body1 = close_vals[i-1] < close_vals[i-2] && close_vals[i-1] > open_vals[i-2];
-        
-        // 第三根蜡烛：阴线，开盘在前一日收盘之上，收盘更低
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        let gap_up2 = open_vals[i] > close_vals[i-1];
-        let lower_close = close_vals[i] < close_vals[i-1];
-        
-        if day1_bullish && is_long_body1 && day2_bearish && gap_up && close_in_body1 &&
-           day3_bearish && gap_up2 && lower_close {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    // 连续内存访问
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(),
+        h_vals.cont_slice(),
+        l_vals.cont_slice(),
+        c_vals.cont_slice()
+    ) {
+        // Tight loop: 所有计算内联，避免函数调用
+        for i in 2..len {
+            // 第一根蜡烛：长阳线
+            let o0 = o_slice[i-2];
+            let h0 = h_slice[i-2];
+            let l0 = l_slice[i-2];
+            let c0 = c_slice[i-2];
+            let body0 = (c0 - o0).abs();
+            let range0 = h0 - l0;
+            let day1_bullish = c0 > o0;
+            let is_long_body1 = body0 > range0 * 0.6;
+            
+            // 第二根蜡烛：小阴线
+            let o1 = o_slice[i-1];
+            let c1 = c_slice[i-1];
+            let day2_bearish = c1 <= o1;
+            let gap_up = o1 > c0;
+            let close_in_body1 = c1 < c0 && c1 > o0;
+            
+            // 第三根蜡烛：阴线
+            let o2 = o_slice[i];
+            let c2 = c_slice[i];
+            let day3_bearish = c2 <= o2;
+            let gap_up2 = o2 > c1;
+            let lower_close = c2 < c1;
+            
+            result[i] = if day1_bullish && is_long_body1 && day2_bearish && gap_up && close_in_body1 &&
+                           day3_bearish && gap_up2 && lower_close { -100 } else { 0 };
+        }
+    } else {
+        // Fallback: 非连续内存
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0);
+            let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0);
+            let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let body0 = (c0 - o0).abs();
+            let range0 = h0 - l0;
+            let day1_bullish = c0 > o0;
+            let is_long_body1 = body0 > range0 * 0.6;
+            
+            let o1 = o_vals.get(i-1).unwrap_or(0.0);
+            let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let day2_bearish = c1 <= o1;
+            let gap_up = o1 > c0;
+            let close_in_body1 = c1 < c0 && c1 > o0;
+            
+            let o2 = o_vals.get(i).unwrap_or(0.0);
+            let c2 = c_vals.get(i).unwrap_or(0.0);
+            let day3_bearish = c2 <= o2;
+            let gap_up2 = o2 > c1;
+            let lower_close = c2 < c1;
+            
+            result[i] = if day1_bullish && is_long_body1 && day2_bearish && gap_up && close_in_body1 &&
+                           day3_bearish && gap_up2 && lower_close { -100 } else { 0 };
         }
     }
     
@@ -4372,7 +4417,7 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDL3BLACKCROWS - 三只黑乌鸦
+// CDL3BLACKCROWS - 三只黑乌鸦 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4381,43 +4426,79 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 检查三根连续阴线
-        let day1_bearish = !is_bullish(open_vals[i-2], close_vals[i-2]);
-        let day2_bearish = !is_bullish(open_vals[i-1], close_vals[i-1]);
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        
-        // 检查每根蜡烛都是长实体
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let (body3, _, _, range3) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        
-        let long_body1 = is_long_body(body1, range1);
-        let long_body2 = is_long_body(body2, range2);
-        let long_body3 = is_long_body(body3, range3);
-        
-        // 检查开盘价递减，收盘价递减
-        let decreasing_opens = open_vals[i-1] < open_vals[i-2] && open_vals[i] < open_vals[i-1];
-        let decreasing_closes = close_vals[i-1] < close_vals[i-2] && close_vals[i] < close_vals[i-1];
-        
-        // 检查每根蜡烛的开盘价都在前一根的实体内
-        let open_in_body1 = open_vals[i-1] < open_vals[i-2] && open_vals[i-1] > close_vals[i-2];
-        let open_in_body2 = open_vals[i] < open_vals[i-1] && open_vals[i] > close_vals[i-1];
-        
-        if day1_bearish && day2_bearish && day3_bearish &&
-           long_body1 && long_body2 && long_body3 &&
-           decreasing_opens && decreasing_closes &&
-           open_in_body1 && open_in_body2 {
-            result[i] = Some(-100);  // 强烈看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let h2 = h_slice[i]; let l2 = l_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0;
+            let day2_bearish = c1 <= o1;
+            let day3_bearish = c2 <= o2;
+            
+            let body0 = (c0 - o0).abs(); let range0 = h0 - l0;
+            let body1 = (c1 - o1).abs(); let range1 = h1 - l1;
+            let body2 = (c2 - o2).abs(); let range2 = h2 - l2;
+            
+            let long_body1 = body0 > range0 * 0.6;
+            let long_body2 = body1 > range1 * 0.6;
+            let long_body3 = body2 > range2 * 0.6;
+            
+            let decreasing_opens = o1 < o0 && o2 < o1;
+            let decreasing_closes = c1 < c0 && c2 < c1;
+            let open_in_body1 = o1 < o0 && o1 > c0;
+            let open_in_body2 = o2 < o1 && o2 > c1;
+            
+            result[i] = if day1_bearish && day2_bearish && day3_bearish &&
+                           long_body1 && long_body2 && long_body3 &&
+                           decreasing_opens && decreasing_closes &&
+                           open_in_body1 && open_in_body2 { -100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let h2 = h_vals.get(i).unwrap_or(0.0);
+            let l2 = l_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0;
+            let day2_bearish = c1 <= o1;
+            let day3_bearish = c2 <= o2;
+            
+            let body0 = (c0 - o0).abs(); let range0 = h0 - l0;
+            let body1 = (c1 - o1).abs(); let range1 = h1 - l1;
+            let body2 = (c2 - o2).abs(); let range2 = h2 - l2;
+            
+            let long_body1 = body0 > range0 * 0.6;
+            let long_body2 = body1 > range1 * 0.6;
+            let long_body3 = body2 > range2 * 0.6;
+            
+            let decreasing_opens = o1 < o0 && o2 < o1;
+            let decreasing_closes = c1 < c0 && c2 < c1;
+            let open_in_body1 = o1 < o0 && o1 > c0;
+            let open_in_body2 = o2 < o1 && o2 > c1;
+            
+            result[i] = if day1_bearish && day2_bearish && day3_bearish &&
+                           long_body1 && long_body2 && long_body3 &&
+                           decreasing_opens && decreasing_closes &&
+                           open_in_body1 && open_in_body2 { -100 } else { 0 };
         }
     }
     
@@ -4425,7 +4506,7 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
     Ok(PySeries(series_result))
 }
 
-// CDL3WHITESOLDIERS - 三个白兵
+// CDL3WHITESOLDIERS - 三个白兵 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4434,50 +4515,89 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 检查三根连续阳线
-        let day1_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let day2_bullish = is_bullish(open_vals[i-1], close_vals[i-1]);
-        let day3_bullish = is_bullish(open_vals[i], close_vals[i]);
-        
-        // 检查每根蜡烛都是长实体
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let (body3, _, _, range3) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        
-        let long_body1 = is_long_body(body1, range1);
-        let long_body2 = is_long_body(body2, range2);
-        let long_body3 = is_long_body(body3, range3);
-        
-        // 检查开盘价递增，收盘价递增
-        let increasing_opens = open_vals[i-1] > open_vals[i-2] && open_vals[i] > open_vals[i-1];
-        let increasing_closes = close_vals[i-1] > close_vals[i-2] && close_vals[i] > close_vals[i-1];
-        
-        // 检查每根蜡烛的开盘价都在前一根的实体内
-        let open_in_body1 = open_vals[i-1] > open_vals[i-2] && open_vals[i-1] < close_vals[i-2];
-        let open_in_body2 = open_vals[i] > open_vals[i-1] && open_vals[i] < close_vals[i-1];
-        
-        // 检查上影线较短
-        let (_, upper_shadow1, _, _) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let (_, upper_shadow2, _, _) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let (_, upper_shadow3, _, _) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        
-        let short_shadows = upper_shadow1 < body1 * 0.3 && upper_shadow2 < body2 * 0.3 && upper_shadow3 < body3 * 0.3;
-        
-        if day1_bullish && day2_bullish && day3_bullish &&
-           long_body1 && long_body2 && long_body3 &&
-           increasing_opens && increasing_closes &&
-           open_in_body1 && open_in_body2 && short_shadows {
-            result[i] = Some(100);  // 强烈看涨信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let h2 = h_slice[i]; let l2 = l_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bullish = c0 > o0;
+            let day2_bullish = c1 > o1;
+            let day3_bullish = c2 > o2;
+            
+            let body0 = (c0 - o0).abs(); let range0 = h0 - l0;
+            let body1 = (c1 - o1).abs(); let range1 = h1 - l1;
+            let body2 = (c2 - o2).abs(); let range2 = h2 - l2;
+            
+            let long_body1 = body0 > range0 * 0.6;
+            let long_body2 = body1 > range1 * 0.6;
+            let long_body3 = body2 > range2 * 0.6;
+            
+            let increasing_opens = o1 > o0 && o2 > o1;
+            let increasing_closes = c1 > c0 && c2 > c1;
+            let open_in_body1 = o1 > o0 && o1 < c0;
+            let open_in_body2 = o2 > o1 && o2 < c1;
+            
+            let upper_shadow0 = h0 - c0.max(o0);
+            let upper_shadow1 = h1 - c1.max(o1);
+            let upper_shadow2 = h2 - c2.max(o2);
+            let short_shadows = upper_shadow0 < body0 * 0.3 && upper_shadow1 < body1 * 0.3 && upper_shadow2 < body2 * 0.3;
+            
+            result[i] = if day1_bullish && day2_bullish && day3_bullish &&
+                           long_body1 && long_body2 && long_body3 &&
+                           increasing_opens && increasing_closes &&
+                           open_in_body1 && open_in_body2 && short_shadows { 100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let h2 = h_vals.get(i).unwrap_or(0.0);
+            let l2 = l_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0;
+            let day2_bullish = c1 > o1;
+            let day3_bullish = c2 > o2;
+            
+            let body0 = (c0 - o0).abs(); let range0 = h0 - l0;
+            let body1 = (c1 - o1).abs(); let range1 = h1 - l1;
+            let body2 = (c2 - o2).abs(); let range2 = h2 - l2;
+            
+            let long_body1 = body0 > range0 * 0.6;
+            let long_body2 = body1 > range1 * 0.6;
+            let long_body3 = body2 > range2 * 0.6;
+            
+            let increasing_opens = o1 > o0 && o2 > o1;
+            let increasing_closes = c1 > c0 && c2 > c1;
+            let open_in_body1 = o1 > o0 && o1 < c0;
+            let open_in_body2 = o2 > o1 && o2 < c1;
+            
+            let upper_shadow0 = h0 - c0.max(o0);
+            let upper_shadow1 = h1 - c1.max(o1);
+            let upper_shadow2 = h2 - c2.max(o2);
+            let short_shadows = upper_shadow0 < body0 * 0.3 && upper_shadow1 < body1 * 0.3 && upper_shadow2 < body2 * 0.3;
+            
+            result[i] = if day1_bullish && day2_bullish && day3_bullish &&
+                           long_body1 && long_body2 && long_body3 &&
+                           increasing_opens && increasing_closes &&
+                           open_in_body1 && open_in_body2 && short_shadows { 100 } else { 0 };
         }
     }
     
@@ -4485,7 +4605,7 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
     Ok(PySeries(series_result))
 }
 
-// CDLDOJI - 十字星
+// CDLDOJI - 十字星 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4494,26 +4614,61 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];  // 直接使用 i32，不用 Option
     
-    for i in 0..open_vals.len() {
-        let (body_size, upper_shadow, lower_shadow, range) = candle_metrics(
-            open_vals[i], high_vals[i], low_vals[i], close_vals[i]
-        );
-        
-        // Doji 的特征：实体很小，上下影线相对较长
-        let is_doji = is_doji_body(body_size, range);
-        let has_shadows = upper_shadow > body_size && lower_shadow > body_size;
-        
-        if is_doji && has_shadows {
-            result[i] = Some(100);  // 不确定信号，但重要的反转候选
-        } else {
-            result[i] = Some(0);
+    // 连续内存访问
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(),
+        h_vals.cont_slice(),
+        l_vals.cont_slice(),
+        c_vals.cont_slice()
+    ) {
+        // Tight loop: 内联所有计算，避免函数调用
+        for i in 0..len {
+            let open = o_slice[i];
+            let high = h_slice[i];
+            let low = l_slice[i];
+            let close = c_slice[i];
+            
+            // 内联 candle_metrics 计算
+            let body = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            // 内联 is_doji_body 和条件判断
+            let is_doji = body < range * 0.1;
+            let has_shadows = upper_shadow > body && lower_shadow > body;
+            
+            result[i] = if is_doji && has_shadows { 100 } else { 0 };
+        }
+    } else {
+        // Fallback: 非连续内存路径
+        for i in 0..len {
+            let open = o_vals.get(i).unwrap_or(0.0);
+            let high = h_vals.get(i).unwrap_or(0.0);
+            let low = l_vals.get(i).unwrap_or(0.0);
+            let close = c_vals.get(i).unwrap_or(0.0);
+            
+            let body = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let is_doji = body < range * 0.1;
+            let has_shadows = upper_shadow > body && lower_shadow > body;
+            
+            result[i] = if is_doji && has_shadows { 100 } else { 0 };
         }
     }
     
@@ -4521,7 +4676,7 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
     Ok(PySeries(series_result))
 }
 
-// CDLHAMMER - 锤子线
+// CDLHAMMER - 锤子线 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4530,27 +4685,63 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 0..open_vals.len() {
-        let (body_size, upper_shadow, lower_shadow, range) = candle_metrics(
-            open_vals[i], high_vals[i], low_vals[i], close_vals[i]
-        );
-        
-        // 锤子线特征：小实体，短上影线，长下影线
-        let small_body = is_short_body(body_size, range);
-        let short_upper_shadow = upper_shadow < body_size * 0.5;
-        let long_lower_shadow = lower_shadow > body_size * 2.0;
-        
-        if small_body && short_upper_shadow && long_lower_shadow {
-            result[i] = Some(100);  // 看涨信号
-        } else {
-            result[i] = Some(0);
+    // 连续内存访问
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(),
+        h_vals.cont_slice(),
+        l_vals.cont_slice(),
+        c_vals.cont_slice()
+    ) {
+        // Tight loop: 所有计算内联
+        for i in 0..len {
+            let open = o_slice[i];
+            let high = h_slice[i];
+            let low = l_slice[i];
+            let close = c_slice[i];
+            
+            // 内联计算
+            let body = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            // 锤子线特征：小实体，短上影线，长下影线
+            let small_body = body < range * 0.3;
+            let short_upper_shadow = upper_shadow < body * 0.5;
+            let long_lower_shadow = lower_shadow > body * 2.0;
+            
+            result[i] = if small_body && short_upper_shadow && long_lower_shadow { 100 } else { 0 };
+        }
+    } else {
+        // Fallback: 非连续内存
+        for i in 0..len {
+            let open = o_vals.get(i).unwrap_or(0.0);
+            let high = h_vals.get(i).unwrap_or(0.0);
+            let low = l_vals.get(i).unwrap_or(0.0);
+            let close = c_vals.get(i).unwrap_or(0.0);
+            
+            let body = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let small_body = body < range * 0.3;
+            let short_upper_shadow = upper_shadow < body * 0.5;
+            let long_lower_shadow = lower_shadow > body * 2.0;
+            
+            result[i] = if small_body && short_upper_shadow && long_lower_shadow { 100 } else { 0 };
         }
     }
     
@@ -4558,7 +4749,7 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDLHANGINGMAN - 上吊线
+// CDLHANGINGMAN - 上吊线 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4567,27 +4758,44 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 0..open_vals.len() {
-        let (body_size, upper_shadow, lower_shadow, range) = candle_metrics(
-            open_vals[i], high_vals[i], low_vals[i], close_vals[i]
-        );
-        
-        // 上吊线特征：小实体，短上影线，长下影线（与锤子线形状相同，但处在上升趋势的顶部）
-        let small_body = is_short_body(body_size, range);
-        let short_upper_shadow = upper_shadow < body_size * 0.5;
-        let long_lower_shadow = lower_shadow > body_size * 2.0;
-        
-        if small_body && short_upper_shadow && long_lower_shadow {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 0..len {
+            let open = o_slice[i]; let high = h_slice[i]; let low = l_slice[i]; let close = c_slice[i];
+            let body_size = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let small_body = body_size < range * 0.3;
+            let short_upper_shadow = upper_shadow < body_size * 0.5;
+            let long_lower_shadow = lower_shadow > body_size * 2.0;
+            
+            result[i] = if small_body && short_upper_shadow && long_lower_shadow { -100 } else { 0 };
+        }
+    } else {
+        for i in 0..len {
+            let open = o_vals.get(i).unwrap_or(0.0); let high = h_vals.get(i).unwrap_or(0.0);
+            let low = l_vals.get(i).unwrap_or(0.0); let close = c_vals.get(i).unwrap_or(0.0);
+            let body_size = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let small_body = body_size < range * 0.3;
+            let short_upper_shadow = upper_shadow < body_size * 0.5;
+            let long_lower_shadow = lower_shadow > body_size * 2.0;
+            
+            result[i] = if small_body && short_upper_shadow && long_lower_shadow { -100 } else { 0 };
         }
     }
     
@@ -4595,7 +4803,7 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
     Ok(PySeries(series_result))
 }
 
-// CDLSHOOTINGSTAR - 流星线
+// CDLSHOOTINGSTAR - 流星线 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4604,27 +4812,44 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 0..open_vals.len() {
-        let (body_size, upper_shadow, lower_shadow, range) = candle_metrics(
-            open_vals[i], high_vals[i], low_vals[i], close_vals[i]
-        );
-        
-        // 流星线特征：小实体，长上影线，短下影线
-        let small_body = is_short_body(body_size, range);
-        let long_upper_shadow = upper_shadow > body_size * 2.0;
-        let short_lower_shadow = lower_shadow < body_size * 0.5;
-        
-        if small_body && long_upper_shadow && short_lower_shadow {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 0..len {
+            let open = o_slice[i]; let high = h_slice[i]; let low = l_slice[i]; let close = c_slice[i];
+            let body_size = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let small_body = body_size < range * 0.3;
+            let long_upper_shadow = upper_shadow > body_size * 2.0;
+            let short_lower_shadow = lower_shadow < body_size * 0.5;
+            
+            result[i] = if small_body && long_upper_shadow && short_lower_shadow { -100 } else { 0 };
+        }
+    } else {
+        for i in 0..len {
+            let open = o_vals.get(i).unwrap_or(0.0); let high = h_vals.get(i).unwrap_or(0.0);
+            let low = l_vals.get(i).unwrap_or(0.0); let close = c_vals.get(i).unwrap_or(0.0);
+            let body_size = (close - open).abs();
+            let upper_shadow = high - open.max(close);
+            let lower_shadow = open.min(close) - low;
+            let range = high - low;
+            
+            let small_body = body_size < range * 0.3;
+            let long_upper_shadow = upper_shadow > body_size * 2.0;
+            let short_lower_shadow = lower_shadow < body_size * 0.5;
+            
+            result[i] = if small_body && long_upper_shadow && short_lower_shadow { -100 } else { 0 };
         }
     }
     
@@ -4632,7 +4857,7 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
     Ok(PySeries(series_result))
 }
 
-// CDLENGULFING - 吞没模式
+// CDLENGULFING - 吞没模式 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4641,40 +4866,56 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 1..open_vals.len() {
-        // 第一根蜡烛
-        let day1_bullish = is_bullish(open_vals[i-1], close_vals[i-1]);
-        let (body1, _, _, _range1) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        
-        // 第二根蜡烛
-        let day2_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let (body2, _, _, _range2) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        
-        // 看涨吞没：前一根阴线，当前阳线，当前实体完全包含前一根实体
-        let bullish_engulfing = !day1_bullish && day2_bullish &&
-                               open_vals[i] < close_vals[i-1] &&
-                               close_vals[i] > open_vals[i-1] &&
-                               body2 > body1;
-        
-        // 看跌吞没：前一根阳线，当前阴线，当前实体完全包含前一根实体
-        let bearish_engulfing = day1_bullish && !day2_bullish &&
-                               open_vals[i] > close_vals[i-1] &&
-                               close_vals[i] < open_vals[i-1] &&
-                               body2 > body1;
-        
-        if bullish_engulfing {
-            result[i] = Some(100);  // 看涨信号
-        } else if bearish_engulfing {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 2 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(_h_slice), Ok(_l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 1..len {
+            let o0 = o_slice[i-1]; let c0 = c_slice[i-1];
+            let o1 = o_slice[i]; let c1 = c_slice[i];
+            
+            let day1_bullish = c0 > o0;
+            let day2_bullish = c1 > o1;
+            let body1 = (c0 - o0).abs();
+            let body2 = (c1 - o1).abs();
+            
+            let bullish_engulfing = !day1_bullish && day2_bullish &&
+                                   o1 < c0 && c1 > o0 && body2 > body1;
+            
+            let bearish_engulfing = day1_bullish && !day2_bullish &&
+                                   o1 > c0 && c1 < o0 && body2 > body1;
+            
+            result[i] = if bullish_engulfing { 100 } else if bearish_engulfing { -100 } else { 0 };
+        }
+    } else {
+        for i in 1..len {
+            let o0 = o_vals.get(i-1).unwrap_or(0.0); let c0 = c_vals.get(i-1).unwrap_or(0.0);
+            let o1 = o_vals.get(i).unwrap_or(0.0); let c1 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0;
+            let day2_bullish = c1 > o1;
+            let body1 = (c0 - o0).abs();
+            let body2 = (c1 - o1).abs();
+            
+            let bullish_engulfing = !day1_bullish && day2_bullish &&
+                                   o1 < c0 && c1 > o0 && body2 > body1;
+            
+            let bearish_engulfing = day1_bullish && !day2_bullish &&
+                                   o1 > c0 && c1 < o0 && body2 > body1;
+            
+            result[i] = if bullish_engulfing { 100 } else if bearish_engulfing { -100 } else { 0 };
         }
     }
     
@@ -4682,7 +4923,7 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
     Ok(PySeries(series_result))
 }
 
-// CDLHARAMI - 孕育线
+// CDLHARAMI - 孕育线 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4691,45 +4932,60 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 1..open_vals.len() {
-        // 第一根蜡烛：长实体
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：小实体，完全包含在第一根实体内
-        let (body2, _, _, range2) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        let small_body2 = is_short_body(body2, range2);
-        
-        // 检查第二根蜡烛是否在第一根实体内
-        let prev_body_high = open_vals[i-1].max(close_vals[i-1]);
-        let prev_body_low = open_vals[i-1].min(close_vals[i-1]);
-        let curr_body_high = open_vals[i].max(close_vals[i]);
-        let curr_body_low = open_vals[i].min(close_vals[i]);
-        
-        let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
-        
-        if long_body1 && small_body2 && inside_body {
-            // 看涨孕育：第一根阴线，第二根阳线
-            if !is_bullish(open_vals[i-1], close_vals[i-1]) && is_bullish(open_vals[i], close_vals[i]) {
-                result[i] = Some(100);
-            }
-            // 看跌孕育：第一根阳线，第二根阴线
-            else if is_bullish(open_vals[i-1], close_vals[i-1]) && !is_bullish(open_vals[i], close_vals[i]) {
-                result[i] = Some(-100);
-            }
-            // 中性孕育
-            else {
-                result[i] = Some(50);
-            }
-        } else {
-            result[i] = Some(0);
+    if len < 2 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 1..len {
+            let o0 = o_slice[i-1]; let h0 = h_slice[i-1]; let l0 = l_slice[i-1]; let c0 = c_slice[i-1];
+            let o1 = o_slice[i]; let h1 = h_slice[i]; let l1 = l_slice[i]; let c1 = c_slice[i];
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let long_body1 = body1 > range1 * 0.6;
+            let small_body2 = body2 < range2 * 0.3;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            result[i] = if long_body1 && small_body2 && inside_body {
+                let day1_bullish = c0 > o0; let day2_bullish = c1 > o1;
+                if !day1_bullish && day2_bullish { 100 } else if day1_bullish && !day2_bullish { -100 } else { 50 }
+            } else { 0 };
+        }
+    } else {
+        for i in 1..len {
+            let o0 = o_vals.get(i-1).unwrap_or(0.0); let h0 = h_vals.get(i-1).unwrap_or(0.0);
+            let l0 = l_vals.get(i-1).unwrap_or(0.0); let c0 = c_vals.get(i-1).unwrap_or(0.0);
+            let o1 = o_vals.get(i).unwrap_or(0.0); let h1 = h_vals.get(i).unwrap_or(0.0);
+            let l1 = l_vals.get(i).unwrap_or(0.0); let c1 = c_vals.get(i).unwrap_or(0.0);
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let long_body1 = body1 > range1 * 0.6;
+            let small_body2 = body2 < range2 * 0.3;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            result[i] = if long_body1 && small_body2 && inside_body {
+                let day1_bullish = c0 > o0; let day2_bullish = c1 > o1;
+                if !day1_bullish && day2_bullish { 100 } else if day1_bullish && !day2_bullish { -100 } else { 50 }
+            } else { 0 };
         }
     }
     
@@ -4737,7 +4993,7 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDLMORNINGSTAR - 启明星
+// CDLMORNINGSTAR - 启明星 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close, penetration=0.3))]
 pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries, penetration: f64) -> PyResult<PySeries> {
@@ -4746,32 +5002,59 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阴线
-        let day1_bearish = !is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：小实体（星线），与第一根有跳空
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let small_body2 = is_short_body(body2, range2);
-        let gap_down = high_vals[i-1] < close_vals[i-2]; // 向下跳空
-        
-        // 第三根蜡烛：阳线，收盘价深入第一根实体
-        let day3_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let penetrates = close_vals[i] > (open_vals[i-2] + close_vals[i-2]) / 2.0 * (1.0 + penetration);
-        
-        if day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates {
-            result[i] = Some(100);  // 强烈看涨信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_slice[i-1]).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let gap_down = h1 < c0;
+            
+            let day3_bullish = c2 > o2;
+            let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
+            
+            result[i] = if day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let h1 = h_vals.get(i-1).unwrap_or(0.0); let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_vals.get(i-1).unwrap_or(0.0)).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let gap_down = h1 < c0;
+            
+            let day3_bullish = c2 > o2;
+            let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
+            
+            result[i] = if day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
         }
     }
     
@@ -4779,7 +5062,7 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     Ok(PySeries(series_result))
 }
 
-// CDLEVENINGSTAR - 黄昏星
+// CDLEVENINGSTAR - 黄昏星 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close, penetration=0.3))]
 pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries, penetration: f64) -> PyResult<PySeries> {
@@ -4788,32 +5071,59 @@ pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阳线
-        let day1_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：小实体（星线），与第一根有跳空
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let small_body2 = is_short_body(body2, range2);
-        let gap_up = low_vals[i-1] > close_vals[i-2]; // 向上跳空
-        
-        // 第三根蜡烛：阴线，收盘价深入第一根实体
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        let penetrates = close_vals[i] < (open_vals[i-2] + close_vals[i-2]) / 2.0 * (1.0 - penetration);
-        
-        if day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates {
-            result[i] = Some(-100);  // 强烈看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        let series_result = Series::new(o.name().clone(), result);
+        return Ok(PySeries(series_result));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let l1 = l_slice[i-1]; let h1 = h_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_slice[i-1]).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let gap_up = l1 > c0;
+            
+            let day3_bearish = c2 <= o2;
+            let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_vals.get(i-1).unwrap_or(0.0)).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let gap_up = l1 > c0;
+            
+            let day3_bearish = c2 <= o2;
+            let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
         }
     }
     
@@ -4830,31 +5140,55 @@ pub fn cdlpiercing(open: PySeries, high: PySeries, low: PySeries, close: PySerie
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 1..open_vals.len() {
-        // 第一根蜡烛：长阴线
-        let day1_bearish = !is_bullish(open_vals[i-1], close_vals[i-1]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：阳线，开盘低于前一日最低价，收盘在前一日实体中点之上
-        let day2_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let opens_lower = open_vals[i] < low_vals[i-1];
-        let midpoint = (open_vals[i-1] + close_vals[i-1]) / 2.0;
-        let closes_above_midpoint = close_vals[i] > midpoint;
-        let closes_below_open = close_vals[i] < open_vals[i-1];
-        
-        if day1_bearish && long_body1 && day2_bullish && opens_lower && 
-           closes_above_midpoint && closes_below_open {
-            result[i] = Some(100);  // 看涨信号
-        } else {
-            result[i] = Some(0);
+    if len < 2 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(_h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 1..len {
+            let o0 = o_slice[i-1]; let l0 = l_slice[i-1]; let c0 = c_slice[i-1];
+            let o1 = o_slice[i]; let c1 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h_vals.get(i-1).unwrap_or(0.0) - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let day2_bullish = c1 > o1;
+            let opens_lower = o1 < l0;
+            let midpoint = (o0 + c0) / 2.0;
+            let closes_above_midpoint = c1 > midpoint;
+            let closes_below_open = c1 < o0;
+            
+            result[i] = if day1_bearish && long_body1 && day2_bullish && opens_lower && 
+                           closes_above_midpoint && closes_below_open { 100 } else { 0 };
+        }
+    } else {
+        for i in 1..len {
+            let o0 = o_vals.get(i-1).unwrap_or(0.0); let l0 = l_vals.get(i-1).unwrap_or(0.0); let c0 = c_vals.get(i-1).unwrap_or(0.0);
+            let o1 = o_vals.get(i).unwrap_or(0.0); let c1 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h_vals.get(i-1).unwrap_or(0.0) - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let day2_bullish = c1 > o1;
+            let opens_lower = o1 < l0;
+            let midpoint = (o0 + c0) / 2.0;
+            let closes_above_midpoint = c1 > midpoint;
+            let closes_below_open = c1 < o0;
+            
+            result[i] = if day1_bearish && long_body1 && day2_bullish && opens_lower && 
+                           closes_above_midpoint && closes_below_open { 100 } else { 0 };
         }
     }
     
@@ -4871,31 +5205,55 @@ pub fn cdldarkcloudcover(open: PySeries, high: PySeries, low: PySeries, close: P
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 1..open_vals.len() {
-        // 第一根蜡烛：长阳线
-        let day1_bullish = is_bullish(open_vals[i-1], close_vals[i-1]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：阴线，开盘高于前一日最高价，收盘在前一日实体中点之下
-        let day2_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        let opens_higher = open_vals[i] > high_vals[i-1];
-        let midpoint = (open_vals[i-1] + close_vals[i-1]) / 2.0;
-        let closes_below_midpoint = close_vals[i] < midpoint;
-        let closes_above_close = close_vals[i] > close_vals[i-1] * (1.0 - penetration);
-        
-        if day1_bullish && long_body1 && day2_bearish && opens_higher && 
-           closes_below_midpoint && closes_above_close {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 2 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(_l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 1..len {
+            let o0 = o_slice[i-1]; let h0 = h_slice[i-1]; let c0 = c_slice[i-1];
+            let o1 = o_slice[i]; let c1 = c_slice[i];
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l_vals.get(i-1).unwrap_or(0.0);
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let day2_bearish = c1 <= o1;
+            let opens_higher = o1 > h0;
+            let midpoint = (o0 + c0) / 2.0;
+            let closes_below_midpoint = c1 < midpoint;
+            let closes_above_close = c1 > c0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && day2_bearish && opens_higher && 
+                           closes_below_midpoint && closes_above_close { -100 } else { 0 };
+        }
+    } else {
+        for i in 1..len {
+            let o0 = o_vals.get(i-1).unwrap_or(0.0); let h0 = h_vals.get(i-1).unwrap_or(0.0); let c0 = c_vals.get(i-1).unwrap_or(0.0);
+            let o1 = o_vals.get(i).unwrap_or(0.0); let c1 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l_vals.get(i-1).unwrap_or(0.0);
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let day2_bearish = c1 <= o1;
+            let opens_higher = o1 > h0;
+            let midpoint = (o0 + c0) / 2.0;
+            let closes_below_midpoint = c1 < midpoint;
+            let closes_above_close = c1 > c0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && day2_bearish && opens_higher && 
+                           closes_below_midpoint && closes_above_close { -100 } else { 0 };
         }
     }
     
@@ -4912,41 +5270,59 @@ pub fn cdlharamicross(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open must be numeric: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High must be numeric: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low must be numeric: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 1..open_vals.len() {
-        // 第一根蜡烛：长实体
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：十字星，完全包含在第一根实体内
-        let (body2, _, _, range2) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        let is_doji2 = is_doji_body(body2, range2);
-        
-        // 检查第二根蜡烛是否在第一根实体内
-        let prev_body_high = open_vals[i-1].max(close_vals[i-1]);
-        let prev_body_low = open_vals[i-1].min(close_vals[i-1]);
-        let curr_body_high = open_vals[i].max(close_vals[i]);
-        let curr_body_low = open_vals[i].min(close_vals[i]);
-        
-        let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
-        
-        if long_body1 && is_doji2 && inside_body {
-            // 看涨十字孕育：第一根阴线，第二根doji
-            if !is_bullish(open_vals[i-1], close_vals[i-1]) {
-                result[i] = Some(100);
-            }
-            // 看跌十字孕育：第一根阳线，第二根doji
-            else {
-                result[i] = Some(-100);
-            }
-        } else {
-            result[i] = Some(0);
+    if len < 2 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 1..len {
+            let o0 = o_slice[i-1]; let h0 = h_slice[i-1]; let l0 = l_slice[i-1]; let c0 = c_slice[i-1];
+            let o1 = o_slice[i]; let h1 = h_slice[i]; let l1 = l_slice[i]; let c1 = c_slice[i];
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            result[i] = if long_body1 && is_doji2 && inside_body {
+                if c0 <= o0 { 100 } else { -100 }
+            } else { 0 };
+        }
+    } else {
+        for i in 1..len {
+            let o0 = o_vals.get(i-1).unwrap_or(0.0); let h0 = h_vals.get(i-1).unwrap_or(0.0);
+            let l0 = l_vals.get(i-1).unwrap_or(0.0); let c0 = c_vals.get(i-1).unwrap_or(0.0);
+            let o1 = o_vals.get(i).unwrap_or(0.0); let h1 = h_vals.get(i).unwrap_or(0.0);
+            let l1 = l_vals.get(i).unwrap_or(0.0); let c1 = c_vals.get(i).unwrap_or(0.0);
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            result[i] = if long_body1 && is_doji2 && inside_body {
+                if c0 <= o0 { 100 } else { -100 }
+            } else { 0 };
         }
     }
     
@@ -4963,37 +5339,62 @@ pub fn cdlmorningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阴线
-        let day1_bearish = !is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：十字星，与第一根有向下跳空
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let is_doji2 = is_doji_body(body2, range2);
-        let gap_down = high_vals[i-1] < close_vals[i-2];
-        
-        // 第三根蜡烛：阳线，收盘价深入第一根实体
-        let day3_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let penetrates = close_vals[i] > (open_vals[i-2] + close_vals[i-2]) / 2.0 * (1.0 + penetration);
-        
-        if day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates {
-            result[i] = Some(100);  // 强烈看涨信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_slice[i-1]).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            let gap_down = h1 < c0;
+            
+            let day3_bullish = c2 > o2;
+            let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
+            
+            result[i] = if day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let h1 = h_vals.get(i-1).unwrap_or(0.0); let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_vals.get(i-1).unwrap_or(0.0)).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            let gap_down = h1 < c0;
+            
+            let day3_bullish = c2 > o2;
+            let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
+            
+            result[i] = if day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
 // CDLEVENINGDOJISTAR - 黄昏十字星
@@ -5005,37 +5406,62 @@ pub fn cdleveningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阳线
-        let day1_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        
-        // 第二根蜡烛：十字星，与第一根有向上跳空
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let is_doji2 = is_doji_body(body2, range2);
-        let gap_up = low_vals[i-1] > close_vals[i-2];
-        
-        // 第三根蜡烛：阴线，收盘价深入第一根实体
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        let penetrates = close_vals[i] < (open_vals[i-2] + close_vals[i-2]) / 2.0 * (1.0 - penetration);
-        
-        if day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates {
-            result[i] = Some(-100);  // 强烈看跌信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let l1 = l_slice[i-1]; let h1 = h_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_slice[i-1]).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            let gap_up = l1 > c0;
+            
+            let day3_bearish = c2 <= o2;
+            let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            
+            let body2 = (c1 - o_vals.get(i-1).unwrap_or(0.0)).abs(); let range2 = h1 - l1;
+            let is_doji2 = body2 < range2 * 0.1;
+            let gap_up = l1 > c0;
+            
+            let day3_bearish = c2 <= o2;
+            let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
+            
+            result[i] = if day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
 // CDL3INSIDE - 三内部上升/下降
@@ -5047,50 +5473,76 @@ pub fn cdl3inside(open: PySeries, high: PySeries, low: PySeries, close: PySeries
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 前两根蜡烛构成孕育线
-        let (body1, _, _, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let small_body2 = is_short_body(body2, range2);
-        
-        // 检查第二根是否在第一根实体内
-        let prev_body_high = open_vals[i-2].max(close_vals[i-2]);
-        let prev_body_low = open_vals[i-2].min(close_vals[i-2]);
-        let curr_body_high = open_vals[i-1].max(close_vals[i-1]);
-        let curr_body_low = open_vals[i-1].min(close_vals[i-1]);
-        let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
-        
-        // 第三根蜡烛确认方向
-        let day3_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        
-        // 三内部上升：第一根阴线，第二根小阳线包含其中，第三根阳线收盘高于第一根开盘价
-        if !is_bullish(open_vals[i-2], close_vals[i-2]) && is_bullish(open_vals[i-1], close_vals[i-1]) &&
-           long_body1 && small_body2 && inside_body && day3_bullish && close_vals[i] > open_vals[i-2] {
-            result[i] = Some(100);  // 看涨信号
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
+            let day3_bullish = c2 > o2; let day3_bearish = c2 <= o2;
+            
+            result[i] = if day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0 {
+                100
+            } else if !day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0 {
+                -100
+            } else { 0 };
         }
-        // 三内部下降：第一根阳线，第二根小阴线包含其中，第三根阴线收盘低于第一根开盘价
-        else if is_bullish(open_vals[i-2], close_vals[i-2]) && !is_bullish(open_vals[i-1], close_vals[i-1]) &&
-                long_body1 && small_body2 && inside_body && day3_bearish && close_vals[i] < open_vals[i-2] {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            
+            let prev_body_high = o0.max(c0); let prev_body_low = o0.min(c0);
+            let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
+            let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
+            
+            let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
+            let day3_bullish = c2 > o2; let day3_bearish = c2 <= o2;
+            
+            result[i] = if day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0 {
+                100
+            } else if !day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0 {
+                -100
+            } else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3OUTSIDE - 三外部上升/下降
+// CDL3OUTSIDE - 三外部上升/下降 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5099,107 +5551,120 @@ pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySerie
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 前两根蜡烛构成吞没模式
-        let day1_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let day1_bearish = !is_bullish(open_vals[i-2], close_vals[i-2]);
-        let day2_bullish = is_bullish(open_vals[i-1], close_vals[i-1]);
-        let day2_bearish = !is_bullish(open_vals[i-1], close_vals[i-1]);
-        
-        let (body1, _, _, _) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let (body2, _, _, _) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        
-        // 看涨吞没
-        let bullish_engulfing = day1_bearish && day2_bullish &&
-                               open_vals[i-1] < close_vals[i-2] &&
-                               close_vals[i-1] > open_vals[i-2] &&
-                               body2 > body1;
-        
-        // 看跌吞没  
-        let bearish_engulfing = day1_bullish && day2_bearish &&
-                               open_vals[i-1] > close_vals[i-2] &&
-                               close_vals[i-1] < open_vals[i-2] &&
-                               body2 > body1;
-        
-        // 第三根蜡烛确认方向
-        let day3_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        
-        // 三外部上升：前两根构成看涨吞没，第三根阳线收盘高于第二根收盘
-        if bullish_engulfing && day3_bullish && close_vals[i] > close_vals[i-1] {
-            result[i] = Some(100);  // 看涨信号
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(_h_slice), Ok(_l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
+            let body1 = (c0 - o0).abs(); let body2 = (c1 - o1).abs();
+            
+            let bullish_engulfing = day1_bearish && day2_bullish && o1 < c0 && c1 > o0 && body2 > body1;
+            let bearish_engulfing = !day1_bearish && !day2_bullish && o1 > c0 && c1 < o0 && body2 > body1;
+            
+            let day3_bullish = c2 > o2;
+            
+            result[i] = if bullish_engulfing && day3_bullish && c2 > c1 { 100 }
+                       else if bearish_engulfing && !day3_bullish && c2 < c1 { -100 }
+                       else { 0 };
         }
-        // 三外部下降：前两根构成看跌吞没，第三根阴线收盘低于第二根收盘
-        else if bearish_engulfing && day3_bearish && close_vals[i] < close_vals[i-1] {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
+            let body1 = (c0 - o0).abs(); let body2 = (c1 - o1).abs();
+            
+            let bullish_engulfing = day1_bearish && day2_bullish && o1 < c0 && c1 > o0 && body2 > body1;
+            let bearish_engulfing = !day1_bearish && !day2_bullish && o1 > c0 && c1 < o0 && body2 > body1;
+            
+            let day3_bullish = c2 > o2;
+            
+            result[i] = if bullish_engulfing && day3_bullish && c2 > c1 { 100 }
+                       else if bearish_engulfing && !day3_bullish && c2 < c1 { -100 }
+                       else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3LINESTRIKE - 三线攻击
+// CDL3LINESTRIKE - 三线攻击 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, _high, _low, close))]
 pub fn cdl3linestrike(open: PySeries, _high: PySeries, _low: PySeries, close: PySeries) -> PyResult<PySeries> {
     let o: Series = open.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 3..open_vals.len() {
-        // 前三根蜡烛：连续同向
-        let day1_bullish = is_bullish(open_vals[i-3], close_vals[i-3]);
-        let day2_bullish = is_bullish(open_vals[i-2], close_vals[i-2]);
-        let day3_bullish = is_bullish(open_vals[i-1], close_vals[i-1]);
-        
-        // 检查前三根是否连续上涨或下跌
-        let three_bulls = day1_bullish && day2_bullish && day3_bullish &&
-                         close_vals[i-2] > close_vals[i-3] &&
-                         close_vals[i-1] > close_vals[i-2];
-                         
-        let three_bears = !day1_bullish && !day2_bullish && !day3_bullish &&
-                         close_vals[i-2] < close_vals[i-3] &&
-                         close_vals[i-1] < close_vals[i-2];
-        
-        // 第四根蜡烛：反方向大蜡烛完全吞没前三根
-        let day4_bullish = is_bullish(open_vals[i], close_vals[i]);
-        let day4_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        
-        // 看涨三线攻击：前三根阴线下跌，第四根阳线完全覆盖
-        if three_bears && day4_bullish &&
-           open_vals[i] < close_vals[i-1] &&
-           close_vals[i] > open_vals[i-3] {
-            result[i] = Some(100);  // 看涨信号
+    if len < 4 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(c_slice)) = (o_vals.cont_slice(), c_vals.cont_slice()) {
+        for i in 3..len {
+            let o0 = o_slice[i-3]; let c0 = c_slice[i-3];
+            let o1 = o_slice[i-2]; let c1 = c_slice[i-2];
+            let o2 = o_slice[i-1]; let c2 = c_slice[i-1];
+            let o3 = o_slice[i]; let c3 = c_slice[i];
+            
+            let day1_bullish = c0 > o0; let day2_bullish = c1 > o1; let day3_bullish = c2 > o2;
+            
+            let three_bulls = day1_bullish && day2_bullish && day3_bullish && c1 > c0 && c2 > c1;
+            let three_bears = !day1_bullish && !day2_bullish && !day3_bullish && c1 < c0 && c2 < c1;
+            
+            let day4_bullish = c3 > o3;
+            
+            result[i] = if three_bears && day4_bullish && o3 < c2 && c3 > o0 { 100 }
+                       else if three_bulls && !day4_bullish && o3 > c2 && c3 < o0 { -100 }
+                       else { 0 };
         }
-        // 看跌三线攻击：前三根阳线上涨，第四根阴线完全覆盖
-        else if three_bulls && day4_bearish &&
-                open_vals[i] > close_vals[i-1] &&
-                close_vals[i] < open_vals[i-3] {
-            result[i] = Some(-100);  // 看跌信号
-        } else {
-            result[i] = Some(0);
+    } else {
+        for i in 3..len {
+            let o0 = o_vals.get(i-3).unwrap_or(0.0); let c0 = c_vals.get(i-3).unwrap_or(0.0);
+            let o1 = o_vals.get(i-2).unwrap_or(0.0); let c1 = c_vals.get(i-2).unwrap_or(0.0);
+            let o2 = o_vals.get(i-1).unwrap_or(0.0); let c2 = c_vals.get(i-1).unwrap_or(0.0);
+            let o3 = o_vals.get(i).unwrap_or(0.0); let c3 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bullish = c0 > o0; let day2_bullish = c1 > o1; let day3_bullish = c2 > o2;
+            
+            let three_bulls = day1_bullish && day2_bullish && day3_bullish && c1 > c0 && c2 > c1;
+            let three_bears = !day1_bullish && !day2_bullish && !day3_bullish && c1 < c0 && c2 < c1;
+            
+            let day4_bullish = c3 > o3;
+            
+            result[i] = if three_bears && day4_bullish && o3 < c2 && c3 > o0 { 100 }
+                       else if three_bulls && !day4_bullish && o3 > c2 && c3 < o0 { -100 }
+                       else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3STARSINSOUTH - 三星在南
+// CDL3STARSINSOUTH - 三星在南 (零拷贝 + tight loop 优化)
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5208,93 +5673,134 @@ pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: Py
     let l: Series = low.into();
     let c: Series = close.into();
     
-    let open_vals: Vec<f64> = o.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let high_vals: Vec<f64> = h.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let low_vals: Vec<f64> = l.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let close_vals: Vec<f64> = c.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let l_vals = l.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Low: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    let mut result = vec![None; open_vals.len()];
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
     
-    for i in 2..open_vals.len() {
-        // 第一根蜡烛：长阴线，长下影线
-        let day1_bearish = !is_bullish(open_vals[i-2], close_vals[i-2]);
-        let (body1, _, lower_shadow1, range1) = candle_metrics(open_vals[i-2], high_vals[i-2], low_vals[i-2], close_vals[i-2]);
-        let long_body1 = is_long_body(body1, range1);
-        let long_lower_shadow1 = lower_shadow1 > body1;
-        
-        // 第二根蜡烛：小实体，开盘价在第一根实体内，收盘价高于第一根最低价
-        let (body2, _, _, range2) = candle_metrics(open_vals[i-1], high_vals[i-1], low_vals[i-1], close_vals[i-1]);
-        let small_body2 = is_short_body(body2, range2);
-        let opens_in_body1 = open_vals[i-1] <= open_vals[i-2] && open_vals[i-1] >= close_vals[i-2];
-        let closes_above_low1 = close_vals[i-1] > low_vals[i-2];
-        
-        // 第三根蜡烛：小阴线，开盘和收盘都在第二根的范围内
-        let day3_bearish = !is_bullish(open_vals[i], close_vals[i]);
-        let (body3, _, _, range3) = candle_metrics(open_vals[i], high_vals[i], low_vals[i], close_vals[i]);
-        let small_body3 = is_short_body(body3, range3);
-        let contained_in_day2 = open_vals[i] <= high_vals[i-1] && close_vals[i] >= low_vals[i-1];
-        
-        if day1_bearish && long_body1 && long_lower_shadow1 &&
-           small_body2 && opens_in_body1 && closes_above_low1 &&
-           day3_bearish && small_body3 && contained_in_day2 {
-            result[i] = Some(100);  // 看涨信号
-        } else {
-            result[i] = Some(0);
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
+        o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
+    ) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let l0 = l_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let h1 = h_slice[i-1]; let l1 = l_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let h2 = h_slice[i]; let l2 = l_slice[i]; let c2 = c_slice[i];
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let lower_shadow1 = o0.min(c0) - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            let long_lower_shadow1 = lower_shadow1 > body1;
+            
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let opens_in_body1 = o1 <= o0 && o1 >= c0;
+            let closes_above_low1 = c1 > l0;
+            
+            let day3_bearish = c2 <= o2;
+            let body3 = (c2 - o2).abs(); let range3 = h2 - l2;
+            let small_body3 = body3 < range3 * 0.3;
+            let contained_in_day2 = o2 <= h1 && c2 >= l1;
+            
+            result[i] = if day1_bearish && long_body1 && long_lower_shadow1 &&
+                           small_body2 && opens_in_body1 && closes_above_low1 &&
+                           day3_bearish && small_body3 && contained_in_day2 { 100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0);
+            let l0 = l_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0);
+            let l1 = l_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let h2 = h_vals.get(i).unwrap_or(0.0);
+            let l2 = l_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let day1_bearish = c0 <= o0;
+            let body1 = (c0 - o0).abs(); let range1 = h0 - l0;
+            let lower_shadow1 = o0.min(c0) - l0;
+            let long_body1 = body1 > range1 * 0.6;
+            let long_lower_shadow1 = lower_shadow1 > body1;
+            
+            let body2 = (c1 - o1).abs(); let range2 = h1 - l1;
+            let small_body2 = body2 < range2 * 0.3;
+            let opens_in_body1 = o1 <= o0 && o1 >= c0;
+            let closes_above_low1 = c1 > l0;
+            
+            let day3_bearish = c2 <= o2;
+            let body3 = (c2 - o2).abs(); let range3 = h2 - l2;
+            let small_body3 = body3 < range3 * 0.3;
+            let contained_in_day2 = o2 <= h1 && c2 >= l1;
+            
+            result[i] = if day1_bearish && long_body1 && long_lower_shadow1 &&
+                           small_body2 && opens_in_body1 && closes_above_low1 &&
+                           day3_bearish && small_body3 && contained_in_day2 { 100 } else { 0 };
         }
     }
     
-    let series_result = Series::new(o.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
-// CDLADVANCEBLOCK - 前进阻挡
+// CDLADVANCEBLOCK - 前进阻挡 (零拷贝 + tight loop 优化)
 #[pyfunction]
 pub fn cdladvanceblock(open: PySeries, high: PySeries, _low: PySeries, close: PySeries) -> PyResult<PySeries> {
-    let open = open.as_ref().f64().unwrap();
-    let high = high.as_ref().f64().unwrap();
-    let close = close.as_ref().f64().unwrap();
+    let o: Series = open.into();
+    let h: Series = high.into();
+    let c: Series = close.into();
     
-    let len = open.len();
-    let mut result: Vec<Option<i32>> = vec![Some(0); len];
+    let o_vals = o.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Open: {}", e)))?;
+    let h_vals = h.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("High: {}", e)))?;
+    let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
-    for i in 2..len {
-        let open_vals = [
-            open.get(i-2).unwrap_or(0.0),
-            open.get(i-1).unwrap_or(0.0),
-            open.get(i).unwrap_or(0.0)
-        ];
-        let high_vals = [
-            high.get(i-2).unwrap_or(0.0),
-            high.get(i-1).unwrap_or(0.0),
-            high.get(i).unwrap_or(0.0)
-        ];
-        let close_vals = [
-            close.get(i-2).unwrap_or(0.0),
-            close.get(i-1).unwrap_or(0.0),
-            close.get(i).unwrap_or(0.0)
-        ];
-        
-        let body1 = close_vals[0] - open_vals[0];
-        let body2 = close_vals[1] - open_vals[1];
-        let body3 = close_vals[2] - open_vals[2];
-        
-        // 前进阻挡：三根连续的白色蜡烛，但第二、三根高点递减，实体递减
-        let three_white_soldiers = body1 > 0.0 && body2 > 0.0 && body3 > 0.0;
-        let ascending_closes = close_vals[0] < close_vals[1] && close_vals[1] < close_vals[2];
-        let opens_within_bodies = open_vals[1] > open_vals[0] && open_vals[1] < close_vals[0] &&
-                                  open_vals[2] > open_vals[1] && open_vals[2] < close_vals[1];
-        let decreasing_highs = high_vals[1] >= high_vals[0] && high_vals[2] <= high_vals[1];
-        let decreasing_bodies = body3 <= body2 && body2 <= body1;
-        
-        if three_white_soldiers && ascending_closes && opens_within_bodies && 
-           decreasing_highs && decreasing_bodies {
-            result[i] = Some(-100); // 看跌信号
-        } else {
-            result[i] = Some(0);
+    let len = o_vals.len();
+    let mut result = vec![0i32; len];
+    
+    if len < 3 {
+        return Ok(PySeries(Series::new(o.name().clone(), result)));
+    }
+    
+    if let (Ok(o_slice), Ok(h_slice), Ok(c_slice)) = (o_vals.cont_slice(), h_vals.cont_slice(), c_vals.cont_slice()) {
+        for i in 2..len {
+            let o0 = o_slice[i-2]; let h0 = h_slice[i-2]; let c0 = c_slice[i-2];
+            let o1 = o_slice[i-1]; let h1 = h_slice[i-1]; let c1 = c_slice[i-1];
+            let o2 = o_slice[i]; let h2 = h_slice[i]; let c2 = c_slice[i];
+            
+            let body1 = c0 - o0; let body2 = c1 - o1; let body3 = c2 - o2;
+            
+            let three_white_soldiers = body1 > 0.0 && body2 > 0.0 && body3 > 0.0;
+            let ascending_closes = c0 < c1 && c1 < c2;
+            let opens_within_bodies = o1 > o0 && o1 < c0 && o2 > o1 && o2 < c1;
+            let decreasing_highs = h1 >= h0 && h2 <= h1;
+            let decreasing_bodies = body3 <= body2 && body2 <= body1;
+            
+            result[i] = if three_white_soldiers && ascending_closes && opens_within_bodies && 
+                           decreasing_highs && decreasing_bodies { -100 } else { 0 };
+        }
+    } else {
+        for i in 2..len {
+            let o0 = o_vals.get(i-2).unwrap_or(0.0); let h0 = h_vals.get(i-2).unwrap_or(0.0); let c0 = c_vals.get(i-2).unwrap_or(0.0);
+            let o1 = o_vals.get(i-1).unwrap_or(0.0); let h1 = h_vals.get(i-1).unwrap_or(0.0); let c1 = c_vals.get(i-1).unwrap_or(0.0);
+            let o2 = o_vals.get(i).unwrap_or(0.0); let h2 = h_vals.get(i).unwrap_or(0.0); let c2 = c_vals.get(i).unwrap_or(0.0);
+            
+            let body1 = c0 - o0; let body2 = c1 - o1; let body3 = c2 - o2;
+            
+            let three_white_soldiers = body1 > 0.0 && body2 > 0.0 && body3 > 0.0;
+            let ascending_closes = c0 < c1 && c1 < c2;
+            let opens_within_bodies = o1 > o0 && o1 < c0 && o2 > o1 && o2 < c1;
+            let decreasing_highs = h1 >= h0 && h2 <= h1;
+            let decreasing_bodies = body3 <= body2 && body2 <= body1;
+            
+            result[i] = if three_white_soldiers && ascending_closes && opens_within_bodies && 
+                           decreasing_highs && decreasing_bodies { -100 } else { 0 };
         }
     }
     
-    let series_result = Series::new(open.name().clone(), result);
-    Ok(PySeries(series_result))
+    Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
 // CDLTRISTAR - 三星
