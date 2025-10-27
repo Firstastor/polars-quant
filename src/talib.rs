@@ -11,6 +11,7 @@ use pyo3_polars::PySeries;
 pub enum MAType {
     SMA, // 简单移动平均
     EMA, // 指数移动平均
+    WMA, // 加权移动平均
 }
 
 /// 通用移动平均计算函数
@@ -61,6 +62,21 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
             for i in period..len {
                 ema = alpha * values[i] + one_minus_alpha * ema;
                 result[i] = Some(ema);
+            }
+        },
+        MAType::WMA => {
+            // 加权移动平均计算
+            // 权重为 1, 2, 3, ..., period，最近的值权重最大
+            let weight_sum = (period * (period + 1)) as f64 / 2.0;
+            let lookback = period - 1;
+            
+            for i in lookback..len {
+                let mut weighted_sum = 0.0;
+                for j in 0..period {
+                    let weight = (j + 1) as f64;
+                    weighted_sum += values[i - lookback + j] * weight;
+                }
+                result[i] = Some(weighted_sum / weight_sum);
             }
         }
     }
@@ -474,20 +490,30 @@ pub fn kama(series: PySeries, period: usize) -> PyResult<PySeries> {
     Ok(PySeries(result_series))
 }
 
-/// 移动平均线 (MA)
+/// 移动平均 (MA) - 支持 SMA、EMA、WMA
 #[pyfunction]
-#[pyo3(signature = (series, period=20))]
-pub fn ma(series: PySeries, period: usize) -> PyResult<PySeries> {
+#[pyo3(signature = (series, period=20, ma_type="SMA"))]
+pub fn ma(series: PySeries, period: usize, ma_type: &str) -> PyResult<PySeries> {
     let s: Series = series.into();
     let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("输入必须是数值类型: {}", e)))?;
     
     let vec_values: Vec<f64> = values.into_iter()
         .map(|opt| opt.unwrap_or(0.0))
         .collect();
     
-    let sma_values = calculate_ma(&vec_values, period, MAType::SMA);
-    let result = Series::new(s.name().clone(), sma_values);
+    // 解析 MA 类型
+    let ma_type_enum = match ma_type.to_uppercase().as_str() {
+        "SMA" => MAType::SMA,
+        "EMA" => MAType::EMA,
+        "WMA" => MAType::WMA,
+        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("不支持的 MA 类型: {}。支持的类型: SMA, EMA, WMA", ma_type)
+        )),
+    };
+    
+    let ma_values = calculate_ma(&vec_values, period, ma_type_enum);
+    let result = Series::new(s.name().clone(), ma_values);
     
     Ok(PySeries(result))
 }

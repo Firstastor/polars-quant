@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod talib;
 mod backtest;
+mod selector;
 
 #[pymodule]
 fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -9,6 +10,13 @@ fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 回测模块 (Backtesting)
     // ====================================================================
     m.add_class::<backtest::Backtest>()?;
+    
+    // ====================================================================
+    // 选股模块 (Stock Selection)
+    // ====================================================================
+    m.add_class::<selector::StockSelector>()?;
+    // 辅助函数：从文件夹加载股票数据
+
     
     // ====================================================================
     // 重叠研究指标 (Overlap Studies) - 移动平均线及相关指标

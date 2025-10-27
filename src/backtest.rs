@@ -6,45 +6,49 @@ use chrono::NaiveDate;
 
 #[derive(Debug, Clone)]
 struct Position {
-    symbol: String,
-    entry_date: String,
-    entry_price: f64,
-    quantity: f64,
-    exit_date: Option<String>,
-    exit_price: Option<f64>,
-    pnl: Option<f64>,
-    pnl_pct: Option<f64>,
-    holding_days: Option<i32>,
+    symbol: String,               // 股票代码
+    entry_date: String,           // 买入日期
+    entry_price: f64,             // 买入价格
+    quantity: f64,                // 持仓数量
+    exit_date: Option<String>,    // 卖出日期
+    exit_price: Option<f64>,      // 卖出价格
+    pnl: Option<f64>,             // 盈亏金额
+    pnl_pct: Option<f64>,         // 盈亏百分比
+    holding_days: Option<i32>,    // 持仓天数
 }
 
 /// 单只股票的回测结果
 #[derive(Debug, Clone)]
 struct StockBacktestResult {
-    symbol: String,
-    daily_dates: Vec<String>,
-    daily_cash: Vec<f64>,
-    daily_stock_value: Vec<f64>,
-    daily_total_value: Vec<f64>,
-    positions: Vec<Position>,
+    symbol: String,                  // 股票代码
+    daily_dates: Vec<String>,        // 日期序列
+    daily_cash: Vec<f64>,            // 每日现金
+    daily_stock_value: Vec<f64>,     // 每日持仓市值
+    daily_total_value: Vec<f64>,     // 每日总资产
+    positions: Vec<Position>,        // 持仓记录
 }
 
 #[pyclass]
 pub struct Backtest {
-    prices: DataFrame,
-    buy_signals: DataFrame,
-    sell_signals: DataFrame,
-    initial_capital: f64,
-    commission_rate: f64,
-    min_commission: f64,
-    slippage: f64,
-    daily_records: Option<DataFrame>,
-    position_records: Option<DataFrame>,
+    prices: DataFrame,                         // 价格数据
+    buy_signals: DataFrame,                    // 买入信号
+    sell_signals: DataFrame,                   // 卖出信号
+    initial_capital: f64,                      // 初始资金
+    commission_rate: f64,                      // 佣金费率
+    min_commission: f64,                       // 最低佣金
+    slippage: f64,                             // 滑点
+    position_size: f64,                        // 仓位大小 (0.0-1.0)，1.0表示满仓
+    benchmark: Option<DataFrame>,              // 基准指数数据（两列：日期和价格，所有股票共享）
+    daily_records: Option<DataFrame>,          // 每日资金记录
+    position_records: Option<DataFrame>,       // 持仓记录
+    performance_metrics: Option<DataFrame>,    // 每日绩效指标
+    execution_time_ms: Option<u128>,           // 回测执行时间（毫秒）
 }
 
 #[pymethods]
 impl Backtest {
     #[new]
-    #[pyo3(signature = (prices, buy_signals, sell_signals, initial_capital=100000.0, commission_rate=0.0003, min_commission=5.0, slippage=0.0))]
+    #[pyo3(signature = (prices, buy_signals, sell_signals, initial_capital=100000.0, commission_rate=0.0003, min_commission=5.0, slippage=0.0, position_size=1.0, benchmark=None))]
     pub fn new(
         prices: PyDataFrame,
         buy_signals: PyDataFrame,
@@ -53,6 +57,8 @@ impl Backtest {
         commission_rate: f64,
         min_commission: f64,
         slippage: f64,
+        position_size: f64,
+        benchmark: Option<PyDataFrame>,
     ) -> PyResult<Self> {
         let prices_df: DataFrame = prices.into();
         let buy_df: DataFrame = buy_signals.into();
@@ -70,6 +76,27 @@ impl Backtest {
             ));
         }
         
+        // 验证仓位大小
+        if position_size <= 0.0 || position_size > 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "仓位大小必须在 (0.0, 1.0] 范围内"
+            ));
+        }
+        
+        // 处理基准数据（所有股票共享同一个基准）
+        let benchmark_df = if let Some(bench) = benchmark {
+            let bench_df: DataFrame = bench.into();
+            // 验证基准数据必须恰好有2列（日期列和价格列）
+            if bench_df.width() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "基准数据必须恰好有2列（日期列和价格列），所有股票共享此基准"
+                ));
+            }
+            Some(bench_df)
+        } else {
+            None
+        };
+        
         Ok(Backtest {
             prices: prices_df,
             buy_signals: buy_df,
@@ -78,8 +105,12 @@ impl Backtest {
             commission_rate,
             min_commission,
             slippage,
+            position_size,
+            benchmark: benchmark_df,
             daily_records: None,
             position_records: None,
+            performance_metrics: None,
+            execution_time_ms: None,
         })
     }
     
@@ -99,6 +130,56 @@ impl Backtest {
                 "没有交易记录"
             )),
         }
+    }
+    
+    /// 获取每日绩效指标（包括每日盈亏、累计收益、与基准对比）
+    pub fn get_performance_metrics(&self) -> PyResult<PyDataFrame> {
+        match &self.performance_metrics {
+            Some(df) => Ok(PyDataFrame(df.clone())),
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "请先运行run()方法"
+            )),
+        }
+    }
+    
+    /// 获取单只股票的每日绩效指标
+    pub fn get_stock_performance(&self, symbol: &str) -> PyResult<PyDataFrame> {
+        if self.daily_records.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "请先运行run()方法"
+            ));
+        }
+        
+        let daily_df = self.daily_records.as_ref().unwrap();
+        
+        // 筛选该股票的数据
+        let stock_data = daily_df.filter(
+            &daily_df.column("symbol")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("获取symbol列失败: {}", e)
+                ))?
+                .str()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("转换为字符串类型失败: {}", e)
+                ))?
+                .equal(symbol)
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("筛选DataFrame失败: {}", e)
+        ))?;
+        
+        if stock_data.height() == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("未找到股票 {} 的数据", symbol)
+            ));
+        }
+        
+        // 计算该股票的绩效指标
+        let performance = Self::calculate_stock_performance(&stock_data, self.initial_capital, symbol, &self.benchmark)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("计算股票绩效失败: {}", e)
+            ))?;
+        
+        Ok(PyDataFrame(performance))
     }
     
     /// 获取单只股票的每日资金记录
@@ -233,36 +314,155 @@ impl Backtest {
             0.0
         };
         
-        Ok(format!(
+        // 获取该股票的绩效数据
+        let (total_return, max_dd, sharpe, final_value) = if self.daily_records.is_some() {
+            match Self::calculate_stock_performance_stats(
+                self.daily_records.as_ref().unwrap(),
+                symbol,
+                self.initial_capital
+            ) {
+                Ok(stats) => stats,
+                Err(_) => (0.0, 0.0, 0.0, self.initial_capital)
+            }
+        } else {
+            (0.0, 0.0, 0.0, self.initial_capital)
+        };
+        
+        // 如果有基准数据，计算Alpha
+        let (alpha, beat_bench_rate, beta) = if self.benchmark.is_some() && self.daily_records.is_some() {
+            let daily_df = self.daily_records.as_ref().unwrap();
+            let stock_data = daily_df.clone().lazy()
+                .filter(col("symbol").eq(lit(symbol)))
+                .collect();
+            
+            if let Ok(stock_df) = stock_data {
+                if let Ok(perf) = Self::calculate_stock_performance(
+                    &stock_df,
+                    self.initial_capital,
+                    symbol,
+                    &self.benchmark
+                ) {
+                    if let (Ok(alpha_col), Ok(bench_col)) = (perf.column("alpha_pct"), perf.column("benchmark_return_pct")) {
+                        if let (Ok(alpha_vals), Ok(bench_vals)) = (alpha_col.f64(), bench_col.f64()) {
+                            let avg_alpha = alpha_vals.mean().unwrap_or(0.0);
+                            
+                            // 计算跑赢基准天数
+                            let mut beat_days = 0;
+                            for i in 0..alpha_vals.len() {
+                                if let Some(a) = alpha_vals.get(i) {
+                                    if a > 0.0 {
+                                        beat_days += 1;
+                                    }
+                                }
+                            }
+                            let beat_rate = if !alpha_vals.is_empty() {
+                                beat_days as f64 / alpha_vals.len() as f64 * 100.0
+                            } else {
+                                0.0
+                            };
+                            
+                            // 直接计算股票的 Beta
+                            let stock_beta = if let Ok(daily_ret_col) = perf.column("daily_return_pct") {
+                                if let Ok(stock_rets) = daily_ret_col.f64() {
+                                    // 收集策略和基准的收益率（跳过第一天）
+                                    let stock_returns: Vec<f64> = stock_rets.iter()
+                                        .filter_map(|v| v)
+                                        .skip(1)
+                                        .collect();
+                                    let bench_returns: Vec<f64> = bench_vals.iter()
+                                        .filter_map(|v| v)
+                                        .skip(1)
+                                        .collect();
+                                    
+                                    // 计算 Beta = Cov(股票收益率, 基准收益率) / Var(基准收益率)
+                                    if !stock_returns.is_empty() && !bench_returns.is_empty() {
+                                        let n = stock_returns.len().min(bench_returns.len());
+                                        let strat_mean = stock_returns[..n].iter().sum::<f64>() / n as f64;
+                                        let bench_mean = bench_returns[..n].iter().sum::<f64>() / n as f64;
+                                        
+                                        let covariance: f64 = stock_returns[..n].iter()
+                                            .zip(bench_returns[..n].iter())
+                                            .map(|(s, b)| (s - strat_mean) * (b - bench_mean))
+                                            .sum::<f64>() / n as f64;
+                                        
+                                        let bench_variance: f64 = bench_returns[..n].iter()
+                                            .map(|b| (b - bench_mean).powi(2))
+                                            .sum::<f64>() / n as f64;
+                                        
+                                        if bench_variance > 0.0 {
+                                            covariance / bench_variance
+                                        } else {
+                                            1.0
+                                        }
+                                    } else {
+                                        1.0
+                                    }
+                                } else {
+                                    1.0
+                                }
+                            } else {
+                                1.0
+                            };
+                            
+                            (Some(avg_alpha), Some(beat_rate), Some(stock_beta))
+                        } else {
+                            (None, None, None)
+                        }
+                    } else {
+                        (None, None, None)
+                    }
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+        
+        let mut summary = format!(
             r#"
-========================================
-  股票 {} 回测摘要
-========================================
+================================================================================
+                        股票 {} 回测摘要
+================================================================================
 
-交易次数: {}
-盈利交易: {} ({:.2}%)
-亏损交易: {} ({:.2}%)
+【绩效总览】
+  初始资金: {:.2}
+  最终资金: {:.2}
+  总盈亏: {:.2}
+  总收益率: {:.2}%
 
-总盈亏: {:.2}
-胜率: {:.2}%
+【风险指标】
+  最大回撤: {:.2}%
+  夏普比率: {:.4}
 
-盈利交易:
+【交易统计】
+  交易次数: {}
+  盈利交易: {} ({:.2}%)
+  亏损交易: {} ({:.2}%)
+  胜率: {:.2}%
+
+【盈利分析】
   总盈利: {:.2}
   平均盈利: {:.2}
   最大盈利: {:.2}
 
-亏损交易:
+【亏损分析】
   总亏损: {:.2}
   平均亏损: {:.2}
   最大亏损: {:.2}
-
-========================================
 "#,
             symbol,
+            self.initial_capital,
+            final_value,
+            total_pnl,
+            total_return,
+            max_dd,
+            sharpe,
             total_trades,
             winning_trades, win_rate,
             losing_trades, if total_trades > 0 { losing_trades as f64 / total_trades as f64 * 100.0 } else { 0.0 },
-            total_pnl,
             win_rate,
             total_win,
             avg_win,
@@ -270,11 +470,39 @@ impl Backtest {
             total_loss,
             avg_loss,
             max_loss,
-        ))
+        );
+        
+        // 如果有基准对比数据，添加基准部分
+        if let (Some(alpha_val), Some(beat_rate), Some(beta_val)) = (alpha, beat_bench_rate, beta) {
+            summary.push_str(&format!(
+                r#"
+【基准对比】
+  Alpha: {:.4}%
+  Beta: {:.4}
+  跑赢基准比例: {:.2}%
+  相对表现: {}
+"#,
+                alpha_val,
+                beta_val,
+                beat_rate,
+                if alpha_val > 0.0 {
+                    "✅ 优于基准"
+                } else {
+                    "⚠️  弱于基准"
+                }
+            ));
+        }
+        
+        summary.push_str("\n================================================================================\n");
+        
+        Ok(summary)
     }
     
     /// 运行回测
     pub fn run(&mut self) -> PyResult<()> {
+        use std::time::Instant;
+        let start_time = Instant::now();
+        
         let dates = self.prices.column("date")
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("获取date列失败: {}", e)
@@ -362,6 +590,7 @@ impl Backtest {
                                 self.commission_rate,
                                 self.min_commission,
                                 self.slippage,
+                                self.position_size,
                             ))
                         })
                         .collect()
@@ -403,6 +632,7 @@ impl Backtest {
                         self.commission_rate,
                         self.min_commission,
                         self.slippage,
+                        self.position_size,
                     ))
                 })
                 .collect()
@@ -491,6 +721,15 @@ impl Backtest {
                 format!("创建position_records失败: {}", e)
             ))?);
         }
+        
+        // 计算每日绩效指标
+        self.performance_metrics = Some(self.calculate_performance_metrics()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("计算绩效指标失败: {}", e)
+            ))?);
+        
+        // 记录执行时间
+        self.execution_time_ms = Some(start_time.elapsed().as_millis());
         
         Ok(())
     }
@@ -856,6 +1095,8 @@ impl Backtest {
   初始资金: {:.2}
   最终资金: {:.2}
   总盈亏: {:.2}
+  仓位大小: {:.0}%
+  执行时间: {}
 
 【收益指标】
   总收益率: {:.2}%
@@ -927,6 +1168,8 @@ impl Backtest {
             initial,
             final_value,
             final_value - initial,
+            self.position_size * 100.0,
+            self.format_execution_time(),
             
             total_return * 100.0,
             annual_return * 100.0,
@@ -983,11 +1226,142 @@ impl Backtest {
         );
         
         println!("{}", summary_text);
+        
+        // 如果有基准数据，添加基准对比部分
+        if self.benchmark.is_some() {
+            if let Some(perf_metrics) = &self.performance_metrics {
+                // 计算策略与基准的对比
+                if let (Ok(strat_ret), Ok(bench_ret), Ok(alpha)) = (
+                    perf_metrics.column("cumulative_return_pct"),
+                    perf_metrics.column("benchmark_return_pct"),
+                    perf_metrics.column("alpha_pct")
+                ) {
+                    if let (Ok(strat_vals), Ok(bench_vals), Ok(alpha_vals)) = (
+                        strat_ret.f64(),
+                        bench_ret.f64(),
+                        alpha.f64()
+                    ) {
+                        let final_strat = strat_vals.get(strat_vals.len() - 1).unwrap_or(0.0);
+                        
+                        // 计算基准累计收益
+                        let mut final_bench = 0.0;
+                        for i in 0..bench_vals.len() {
+                            if let Some(val) = bench_vals.get(i) {
+                                final_bench += val;
+                            }
+                        }
+                        
+                        // 计算Alpha相关指标
+                        let avg_alpha = alpha_vals.mean().unwrap_or(0.0);
+                        
+                        // 计算胜过基准的天数
+                        let mut beat_benchmark_days = 0;
+                        for i in 0..alpha_vals.len() {
+                            if let Some(a) = alpha_vals.get(i) {
+                                if a > 0.0 {
+                                    beat_benchmark_days += 1;
+                                }
+                            }
+                        }
+                        let beat_rate = if !alpha_vals.is_empty() {
+                            beat_benchmark_days as f64 / alpha_vals.len() as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        
+                        // 获取Beta值
+                        let beta = if let Ok(beta_col) = perf_metrics.column("beta") {
+                            if let Ok(beta_series) = beta_col.f64() {
+                                beta_series.get(0).unwrap_or(1.0)
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
+                        
+                        // 计算信息比率 (Information Ratio)
+                        let alpha_std = alpha_vals.std(0).unwrap_or(0.0);
+                        let information_ratio = if alpha_std > 0.0 {
+                            avg_alpha / alpha_std * (252.0_f64).sqrt()
+                        } else {
+                            0.0
+                        };
+                        
+                        let benchmark_text = format!(
+                            r#"
+================================================================================
+                            基准对比分析
+================================================================================
+
+【收益对比】
+  策略累计收益率: {:.2}%
+  基准累计收益率: {:.2}%
+  超额收益: {:.2}%
+  
+【风险分析】
+  Alpha: {:.4}%
+  Beta: {:.4}
+  IR: {:.4}
+  
+【相对表现】
+  跑赢基准天数: {} 天
+  跑赢基准比例: {:.2}%
+  跑输基准天数: {} 天
+  
+【综合评价】
+  {}
+
+================================================================================
+"#,
+                            final_strat,
+                            final_bench,
+                            final_strat - final_bench,
+                            
+                            avg_alpha,
+                            beta,
+                            information_ratio,
+                            
+                            beat_benchmark_days,
+                            beat_rate,
+                            alpha_vals.len() - beat_benchmark_days,
+                            
+                            if final_strat > final_bench {
+                                format!("✅ 策略表现优于基准，超额收益为 {:.2}%", final_strat - final_bench)
+                            } else {
+                                format!("⚠️  策略表现弱于基准，相对损失为 {:.2}%", final_bench - final_strat)
+                            }
+                        );
+                        
+                        println!("{}", benchmark_text);
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 }
 
 impl Backtest {
+    /// 格式化执行时间
+    fn format_execution_time(&self) -> String {
+        match self.execution_time_ms {
+            Some(ms) => {
+                if ms < 1000 {
+                    format!("{}ms", ms)
+                } else if ms < 60000 {
+                    format!("{:.2}s", ms as f64 / 1000.0)
+                } else {
+                    let minutes = ms / 60000;
+                    let seconds = (ms % 60000) as f64 / 1000.0;
+                    format!("{}m {:.1}s", minutes, seconds)
+                }
+            },
+            None => "未运行".to_string()
+        }
+    }
+    
     /// 对单只股票进行回测
     fn backtest_single_stock(
         symbol: String,
@@ -999,6 +1373,7 @@ impl Backtest {
         commission_rate: f64,
         min_commission: f64,
         slippage: f64,
+        position_size: f64,
     ) -> StockBacktestResult {
         let n_days = dates.len();
         let mut cash = initial_capital;
@@ -1055,8 +1430,8 @@ impl Backtest {
                 // 应用滑点：买入价格上浮
                 let buy_price = price * (1.0 + slippage);
                 
-                // 计算可以买入的整百股数量（使用全部可用资金）
-                let available_cash = cash;
+                // 计算可以买入的整百股数量（使用指定仓位比例的资金）
+                let available_cash = cash * position_size;
                 
                 // 先估算可买数量（考虑佣金）
                 let estimated_quantity = available_cash / (buy_price * (1.0 + commission_rate));
@@ -1141,6 +1516,343 @@ impl Backtest {
             daily_total_value,
             positions: closed_positions,
         }
+    }
+    
+    /// 计算每日绩效指标（包括每日盈亏、累计收益、与基准对比）
+    fn calculate_performance_metrics(&mut self) -> Result<DataFrame, PolarsError> {
+        let daily_df = self.daily_records.as_ref()
+            .ok_or_else(|| PolarsError::ComputeError("daily_records未初始化".into()))?;
+        
+        // 按日期分组，计算每日总资产
+        let grouped = daily_df
+            .clone()
+            .lazy()
+            .group_by([col("date")])
+            .agg([
+                col("total_value").sum().alias("portfolio_value"),
+            ])
+            .sort(["date"], Default::default())
+            .collect()?;
+        
+        let dates = grouped.column("date")?.str()?;
+        let portfolio_values = grouped.column("portfolio_value")?.f64()?;
+        
+        let n_days = portfolio_values.len();
+        let mut daily_pnl = Vec::with_capacity(n_days);
+        let mut daily_return = Vec::with_capacity(n_days);
+        let mut cumulative_pnl = Vec::with_capacity(n_days);
+        let mut cumulative_return = Vec::with_capacity(n_days);
+        
+        // 计算每日盈亏和收益率
+        for i in 0..n_days {
+            let current_value = portfolio_values.get(i).unwrap_or(0.0);
+            
+            if i == 0 {
+                daily_pnl.push(0.0);
+                daily_return.push(0.0);
+                cumulative_pnl.push(0.0);
+                cumulative_return.push(0.0);
+            } else {
+                let prev_value = portfolio_values.get(i - 1).unwrap_or(0.0);
+                let pnl = current_value - prev_value;
+                let ret = if prev_value > 0.0 {
+                    (current_value - prev_value) / prev_value * 100.0
+                } else {
+                    0.0
+                };
+                
+                daily_pnl.push(pnl);
+                daily_return.push(ret);
+                cumulative_pnl.push(current_value - self.initial_capital);
+                cumulative_return.push((current_value - self.initial_capital) / self.initial_capital * 100.0);
+            }
+        }
+        
+        // 如果有基准数据，一次性计算 Alpha、Beta 和相对收益
+        let (benchmark_return, alpha, relative_return, beta) = if let Some(bench_df) = &self.benchmark {
+            let bench_col_name = bench_df.get_column_names()[1];
+            let bench_prices = bench_df.column(bench_col_name)?.f64()?;
+            
+            let bench_len = bench_prices.len();
+            let bench_initial = bench_prices.get(0).unwrap_or(100.0);
+            
+            // 直接计算基准收益率
+            let mut bench_returns = Vec::with_capacity(n_days);
+            bench_returns.push(0.0);  // 首日
+            
+            for i in 1..n_days {
+                let idx = i.min(bench_len - 1);
+                let prev_idx = (i - 1).min(bench_len - 1);
+                
+                let bench_current = bench_prices.get(idx).unwrap_or(100.0);
+                let bench_prev = bench_prices.get(prev_idx).unwrap_or(100.0);
+                
+                let bench_ret = if bench_prev > 0.0 {
+                    (bench_current - bench_prev) / bench_prev * 100.0
+                } else {
+                    0.0
+                };
+                
+                bench_returns.push(bench_ret);
+            }
+            
+            let mut alphas = Vec::with_capacity(n_days);
+            let mut rel_returns = Vec::with_capacity(n_days);
+            
+            // 首日初始化
+            alphas.push(0.0);
+            rel_returns.push(0.0);
+            
+            // 一次遍历计算 Alpha 和相对收益
+            for i in 1..n_days {
+                alphas.push(daily_return[i] - bench_returns[i]);
+                
+                // 相对收益：策略累计收益 - 基准累计收益
+                let idx = i.min(bench_len - 1);
+                let bench_current = bench_prices.get(idx).unwrap_or(100.0);
+                let bench_cum_ret = if bench_initial > 0.0 {
+                    (bench_current - bench_initial) / bench_initial * 100.0
+                } else {
+                    0.0
+                };
+                rel_returns.push(cumulative_return[i] - bench_cum_ret);
+            }
+            
+            // 直接计算 Beta = Cov(策略收益率, 基准收益率) / Var(基准收益率)
+            let beta_value = if n_days > 1 {
+                let n = n_days - 1;
+                let strat_mean = daily_return[1..].iter().sum::<f64>() / n as f64;
+                let bench_mean = bench_returns[1..].iter().sum::<f64>() / n as f64;
+                
+                let covariance: f64 = daily_return[1..].iter()
+                    .zip(bench_returns[1..].iter())
+                    .map(|(s, b)| (s - strat_mean) * (b - bench_mean))
+                    .sum::<f64>() / n as f64;
+                
+                let bench_variance: f64 = bench_returns[1..].iter()
+                    .map(|b| (b - bench_mean).powi(2))
+                    .sum::<f64>() / n as f64;
+                
+                if bench_variance > 0.0 {
+                    covariance / bench_variance
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+            
+            (Some(bench_returns), Some(alphas), Some(rel_returns), Some(beta_value))
+        } else {
+            (None, None, None, None)
+        };
+        
+        // 构建绩效指标DataFrame
+        let beta_for_storage = beta; // 保存Beta用于存储
+        let mut columns = vec![
+            dates.clone().into_series().into_column(),
+            {
+                let mut s = portfolio_values.clone().into_series();
+                s.rename("portfolio_value".into());
+                s.into_column()
+            },
+            Series::new("daily_pnl".into(), daily_pnl).into_column(),
+            Series::new("daily_return_pct".into(), daily_return).into_column(),
+            Series::new("cumulative_pnl".into(), cumulative_pnl).into_column(),
+            Series::new("cumulative_return_pct".into(), cumulative_return).into_column(),
+        ];
+        
+        // 如果有基准数据，添加基准相关列
+        if let Some(bench_ret) = benchmark_return {
+            columns.push(Series::new("benchmark_return_pct".into(), bench_ret).into_column());
+        }
+        if let Some(alpha_vec) = alpha {
+            columns.push(Series::new("alpha_pct".into(), alpha_vec).into_column());
+        }
+        if let Some(rel_ret) = relative_return {
+            columns.push(Series::new("relative_return_pct".into(), rel_ret).into_column());
+        }
+        if let Some(beta_val) = beta_for_storage {
+            // Beta作为常量列添加到所有行
+            columns.push(Series::new("beta".into(), vec![beta_val; n_days]).into_column());
+        }
+        
+        DataFrame::new(columns)
+    }
+    
+    /// 计算单只股票的基础绩效统计 (收益率、最大回撤、夏普比率、最终资产)
+    fn calculate_stock_performance_stats(
+        daily_df: &DataFrame,
+        symbol: &str,
+        initial_capital: f64,
+    ) -> Result<(f64, f64, f64, f64), PolarsError> {
+        // 筛选该股票的数据
+        let stock_data = daily_df.clone().lazy()
+            .filter(col("symbol").eq(lit(symbol)))
+            .collect()?;
+        
+        if stock_data.height() == 0 {
+            return Ok((0.0, 0.0, 0.0, initial_capital));
+        }
+        
+        let total_values = stock_data.column("total_value")?.f64()?;
+        let n_days = total_values.len();
+        
+        if n_days == 0 {
+            return Ok((0.0, 0.0, 0.0, initial_capital));
+        }
+        
+        // 计算总收益率
+        let final_value = total_values.get(n_days - 1).unwrap_or(initial_capital);
+        let total_return = (final_value - initial_capital) / initial_capital * 100.0;
+        
+        // 计算最大回撤
+        let mut max_value = initial_capital;
+        let mut max_drawdown = 0.0;
+        
+        for i in 0..n_days {
+            let value = total_values.get(i).unwrap_or(initial_capital);
+            if value > max_value {
+                max_value = value;
+            }
+            let drawdown = (max_value - value) / max_value;
+            if drawdown > max_drawdown {
+                max_drawdown = drawdown;
+            }
+        }
+        
+        // 计算日收益率序列
+        let mut daily_returns = Vec::with_capacity(n_days - 1);
+        for i in 1..n_days {
+            let prev = total_values.get(i - 1).unwrap_or(initial_capital);
+            let curr = total_values.get(i).unwrap_or(initial_capital);
+            if prev > 0.0 {
+                daily_returns.push((curr - prev) / prev);
+            }
+        }
+        
+        // 计算夏普比率
+        let sharpe_ratio = if !daily_returns.is_empty() {
+            let mean_return = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
+            let variance = daily_returns.iter()
+                .map(|r| (r - mean_return).powi(2))
+                .sum::<f64>() / daily_returns.len() as f64;
+            let std_return = variance.sqrt();
+            if std_return > 0.0 {
+                mean_return / std_return * (252.0_f64).sqrt()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        
+        Ok((total_return, max_drawdown * 100.0, sharpe_ratio, final_value))
+    }
+    
+    /// 计算单只股票的绩效指标
+    fn calculate_stock_performance(
+        stock_data: &DataFrame,
+        initial_capital: f64,
+        symbol: &str,
+        benchmark: &Option<DataFrame>,
+    ) -> Result<DataFrame, PolarsError> {
+        let dates = stock_data.column("date")?.str()?;
+        let total_values = stock_data.column("total_value")?.f64()?;
+        
+        let n_days = total_values.len();
+        let mut daily_pnl = Vec::with_capacity(n_days);
+        let mut daily_return = Vec::with_capacity(n_days);
+        let mut cumulative_pnl = Vec::with_capacity(n_days);
+        let mut cumulative_return = Vec::with_capacity(n_days);
+        
+        // 计算每日盈亏和收益率
+        for i in 0..n_days {
+            let current_value = total_values.get(i).unwrap_or(initial_capital);
+            
+            if i == 0 {
+                daily_pnl.push(0.0);
+                daily_return.push(0.0);
+                cumulative_pnl.push(0.0);
+                cumulative_return.push(0.0);
+            } else {
+                let prev_value = total_values.get(i - 1).unwrap_or(initial_capital);
+                let pnl = current_value - prev_value;
+                let ret = if prev_value > 0.0 {
+                    (current_value - prev_value) / prev_value * 100.0
+                } else {
+                    0.0
+                };
+                
+                daily_pnl.push(pnl);
+                daily_return.push(ret);
+                cumulative_pnl.push(current_value - initial_capital);
+                cumulative_return.push((current_value - initial_capital) / initial_capital * 100.0);
+            }
+        }
+        
+        // 如果有基准数据，计算与基准的对比
+        let (benchmark_return, alpha, relative_return) = if let Some(bench_df) = benchmark {
+            let bench_col_name = bench_df.get_column_names()[1];
+            let bench_prices = bench_df.column(bench_col_name)?.f64()?;
+            
+            let mut bench_returns = Vec::with_capacity(n_days);
+            let mut alphas = Vec::with_capacity(n_days);
+            let mut rel_returns = Vec::with_capacity(n_days);
+            
+            for i in 0..n_days {
+                if i == 0 {
+                    bench_returns.push(0.0);
+                    alphas.push(0.0);
+                    rel_returns.push(0.0);
+                } else {
+                    let bench_current = bench_prices.get(i.min(bench_prices.len() - 1)).unwrap_or(100.0);
+                    let bench_prev = bench_prices.get((i - 1).min(bench_prices.len() - 1)).unwrap_or(100.0);
+                    
+                    let bench_ret = if bench_prev > 0.0 {
+                        (bench_current - bench_prev) / bench_prev * 100.0
+                    } else {
+                        0.0
+                    };
+                    
+                    bench_returns.push(bench_ret);
+                    alphas.push(daily_return[i] - bench_ret);
+                    rel_returns.push(cumulative_return[i] - ((bench_current - bench_prices.get(0).unwrap_or(100.0)) / bench_prices.get(0).unwrap_or(100.0) * 100.0));
+                }
+            }
+            
+            (Some(bench_returns), Some(alphas), Some(rel_returns))
+        } else {
+            (None, None, None)
+        };
+        
+        // 构建绩效指标DataFrame
+        let mut columns = vec![
+            Series::new("symbol".into(), vec![symbol; n_days]).into_column(),
+            dates.clone().into_series().into_column(),
+            {
+                let mut s = total_values.clone().into_series();
+                s.rename("stock_value".into());
+                s.into_column()
+            },
+            Series::new("daily_pnl".into(), daily_pnl).into_column(),
+            Series::new("daily_return_pct".into(), daily_return).into_column(),
+            Series::new("cumulative_pnl".into(), cumulative_pnl).into_column(),
+            Series::new("cumulative_return_pct".into(), cumulative_return).into_column(),
+        ];
+        
+        // 如果有基准数据，添加基准相关列
+        if let Some(bench_ret) = benchmark_return {
+            columns.push(Series::new("benchmark_return_pct".into(), bench_ret).into_column());
+        }
+        if let Some(alpha_vec) = alpha {
+            columns.push(Series::new("alpha_pct".into(), alpha_vec).into_column());
+        }
+        if let Some(rel_ret) = relative_return {
+            columns.push(Series::new("relative_return_pct".into(), rel_ret).into_column());
+        }
+        
+        DataFrame::new(columns)
     }
     
     /// 计算两个日期字符串之间的天数差（优化版：早期退出）
