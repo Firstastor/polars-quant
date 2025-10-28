@@ -14,10 +14,10 @@ pub enum MAType {
     WMA, // 加权移动平均
 }
 
-/// 通用移动平均计算函数
+/// 通用移动平均辅助函数
 /// 
 /// 支持多种移动平均类型（SMA, EMA, DEMA, TEMA 等）
-pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Option<f64>> {
+pub fn ma_helper(values: &[f64], period: usize, ma_type: MAType) -> Vec<Option<f64>> {
     let len = values.len();
     let mut result = vec![None; len];
     
@@ -84,8 +84,8 @@ pub fn calculate_ma(values: &[f64], period: usize, ma_type: MAType) -> Vec<Optio
     result
 }
 
-// RSI计算函数
-fn calculate_rsi(values: &[f64], period: usize) -> Vec<f64> {
+// RSI辅助函数 - 公开给内部使用
+pub fn rsi_helper(values: &[f64], period: usize) -> Vec<f64> {
     let len = values.len();
     let mut result = vec![f64::NAN; len];
     
@@ -130,47 +130,119 @@ fn calculate_rsi(values: &[f64], period: usize) -> Vec<f64> {
     result
 }
 
-// ATR计算函数
-fn calculate_atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let len = high.len();
-    let mut result = vec![f64::NAN; len];
-    
-    if period == 0 || period >= len {
-        return result;
+/// 希尔伯特变换辅助函数
+/// 
+/// 实现完整的John Ehlers希尔伯特变换算法
+/// 用于周期分析和趋势提取
+pub struct HilbertTransform {
+    detrend: [f64; 7],          // 去趋势价格缓冲区
+    i1_buf: [f64; 7],           // I1同相分量缓冲区
+    q1_buf: [f64; 7],           // Q1正交分量缓冲区
+    re: f64,                    // 平滑后的同相分量
+    im: f64,                    // 平滑后的正交分量
+    period: f64,                // 主导周期
+    smooth_period: f64,         // 平滑周期
+    phase: f64,                 // 相位角度
+    price_history: [f64; 7],    // 价格历史缓冲区
+    smooth_price: f64,          // 平滑价格
+}
+
+impl HilbertTransform {
+    pub fn new() -> Self {
+        Self {
+            detrend: [0.0; 7],
+            i1_buf: [0.0; 7],
+            q1_buf: [0.0; 7],
+            re: 0.0,
+            im: 0.0,
+            period: 15.0,
+            smooth_period: 15.0,
+            phase: 0.0,
+            price_history: [0.0; 7],
+            smooth_price: 0.0,
+        }
     }
     
-    // 直接在一次遍历中计算TR和累积求和,避免额外Vec分配
-    // 第一个TR值
-    let first_tr = high[0] - low[0];
-    let mut tr_sum = first_tr;
-    
-    // 累积前period个TR值的和
-    for i in 1..period {
-        let tr1 = high[i] - low[i];
-        let tr2 = (high[i] - close[i - 1]).abs();
-        let tr3 = (low[i] - close[i - 1]).abs();
-        let tr = tr1.max(tr2).max(tr3);
-        tr_sum += tr;
-    }
-    
-    // 第一个ATR值 = SMA of TR
-    result[period - 1] = tr_sum / period as f64;
-    
-    // 使用Wilder的平滑方法: ATR = ((period-1)*prev_ATR + current_TR) / period
-    let smoothing_factor = 1.0 / period as f64;
-    let retention_factor = (period - 1) as f64 / period as f64;
-    
-    for i in period..len {
-        let tr1 = high[i] - low[i];
-        let tr2 = (high[i] - close[i - 1]).abs();
-        let tr3 = (low[i] - close[i - 1]).abs();
-        let tr = tr1.max(tr2).max(tr3);
+    /// 更新希尔伯特变换状态
+    /// 
+    /// 返回：(趋势线, 周期, 相位, 同相分量, 正交分量)
+    pub fn update(&mut self, price: f64) -> (f64, f64, f64, f64, f64) {
+        // 价格平滑（4点加权移动平均）
+        self.price_history.rotate_right(1);
+        self.price_history[0] = price;
+        self.smooth_price = (4.0 * self.price_history[0] + 3.0 * self.price_history[1] 
+                           + 2.0 * self.price_history[2] + self.price_history[3]) / 10.0;
         
-        // 增量更新
-        result[i] = result[i - 1] * retention_factor + tr * smoothing_factor;
+        // 去趋势器
+        let detrended = (0.0962 * self.smooth_price + 0.5769 * self.price_history[2]
+                        - 0.5769 * self.price_history[4] - 0.0962 * self.price_history[6])
+                        * (0.075 * self.period + 0.54);
+        
+        // 计算Q1正交分量
+        let q1 = (0.0962 * detrended + 0.5769 * self.detrend[2]
+                 - 0.5769 * self.detrend[4] - 0.0962 * self.detrend[6])
+                 * (0.075 * self.period + 0.54);
+        
+        // 计算I1同相分量
+        let i1 = self.detrend[3];
+        
+        self.detrend.rotate_right(1);
+        self.detrend[0] = detrended;
+        
+        // 平滑I1和Q1
+        let ji = (0.0962 * i1 + 0.5769 * self.i1_buf[2]
+                 - 0.5769 * self.i1_buf[4] - 0.0962 * self.i1_buf[6])
+                 * (0.075 * self.period + 0.54);
+        let jq = (0.0962 * q1 + 0.5769 * self.q1_buf[2]
+                 - 0.5769 * self.q1_buf[4] - 0.0962 * self.q1_buf[6])
+                 * (0.075 * self.period + 0.54);
+        
+        self.i1_buf.rotate_right(1);
+        self.i1_buf[0] = i1;
+        self.q1_buf.rotate_right(1);
+        self.q1_buf[0] = q1;
+        
+        // 计算I2和Q2
+        let i2 = i1 - jq;
+        let q2 = q1 + ji;
+        
+        // 平滑I2和Q2
+        self.re = 0.2 * i2 + 0.8 * self.re;
+        self.im = 0.2 * q2 + 0.8 * self.im;
+        
+        // 计算主导周期
+        let mut raw_period = if i2 != 0.0 && q2 != 0.0 {
+            let period_value = 2.0 * std::f64::consts::PI / (q2 / i2).atan();
+            period_value.abs()
+        } else {
+            self.period
+        };
+        
+        raw_period = raw_period.max(6.0).min(50.0);
+        
+        self.period = 0.2 * raw_period + 0.8 * self.period;
+        self.smooth_period = 0.33 * self.period + 0.67 * self.smooth_period;
+        
+        // 计算相位角度
+        if self.re != 0.0 {
+            let raw_phase = (self.im / self.re).atan();
+            let mut phase_deg = raw_phase * 180.0 / std::f64::consts::PI;
+            
+            if self.re < 0.0 {
+                phase_deg += 180.0;
+            }
+            if phase_deg < 0.0 {
+                phase_deg += 360.0;
+            }
+            if phase_deg > 360.0 {
+                phase_deg -= 360.0;
+            }
+            
+            self.phase = phase_deg;
+        }
+        
+        (self.smooth_price, self.smooth_period, self.phase, self.re, self.im)
     }
-    
-    result
 }
 
 // 蜡烛图辅助函数
@@ -194,26 +266,28 @@ fn is_doji_body(body_size: f64, range: f64) -> bool {
     body_size < range * 0.1
 }
 
-/// 布林带 (BBAND)
-/// 计算上轨、中轨、下轨
-#[pyfunction]
-#[pyo3(signature = (series, period=20, std_dev=2.0))]
-pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySeries, PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 布林带 (BBAND) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// - `std_dev`: 标准差倍数
+/// 
+/// # 返回
+/// (上轨, 中轨, 下轨) Series 元组
+pub fn calculate_bband(series: &Series, period: usize, std_dev: f64) -> PolarsResult<(Series, Series, Series)> {
+    let values = series.f64()?;
     let len = values.len();
     let mut upper_out = vec![f64::NAN; len];
     let mut middle_out = vec![f64::NAN; len];
     let mut lower_out = vec![f64::NAN; len];
     
     if period == 0 || period > len {
-        let base_name = s.name();
+        let base_name = series.name();
         return Ok((
-            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper_out)),
-            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle_out)),
-            PySeries(Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower_out))
+            Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper_out),
+            Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle_out),
+            Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower_out)
         ));
     }
     
@@ -235,7 +309,7 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         // 第一个输出
         let sma = sum * inv_period;
         let variance = (sum_sq * inv_period) - (sma * sma);
-        let std = variance.max(0.0).sqrt(); // 避免负数（浮点精度问题）
+        let std = variance.max(0.0).sqrt();
         upper_out[lookback] = sma + std_dev * std;
         middle_out[lookback] = sma;
         lower_out[lookback] = sma - std_dev * std;
@@ -245,11 +319,9 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
             let old_val = input[i - period];
             let new_val = input[i];
             
-            // 更新 sum 和 sum_sq
             sum = sum - old_val + new_val;
             sum_sq = sum_sq - old_val * old_val + new_val * new_val;
             
-            // 计算 SMA 和标准差
             let sma = sum * inv_period;
             let variance = (sum_sq * inv_period) - (sma * sma);
             let std = variance.max(0.0).sqrt();
@@ -265,7 +337,6 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         let period_f64 = period as f64;
         let inv_period = 1.0 / period_f64;
         
-        // 初始化：计算第一个窗口的 sum 和 sum_sq
         let mut sum = 0.0;
         let mut sum_sq = 0.0;
         for i in 0..period {
@@ -274,7 +345,6 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
             sum_sq += val * val;
         }
         
-        // 第一个输出
         let sma = sum * inv_period;
         let variance = (sum_sq * inv_period) - (sma * sma);
         let std = variance.max(0.0).sqrt();
@@ -282,7 +352,6 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         middle_out[lookback] = sma;
         lower_out[lookback] = sma - std_dev * std;
         
-        // 滑动窗口
         for i in period..len {
             let old_val = vec_values[i - period];
             let new_val = vec_values[i];
@@ -300,30 +369,43 @@ pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySerie
         }
     }
     
-    let base_name = s.name();
+    let base_name = series.name();
     let upper_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_upper", base_name)), upper_out);
     let middle_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_middle", base_name)), middle_out);
     let lower_series = Series::new(PlSmallStr::from_str(&format!("{}_bb_lower", base_name)), lower_out);
     
-    Ok((PySeries(upper_series), PySeries(middle_series), PySeries(lower_series)))
+    Ok((upper_series, middle_series, lower_series))
 }
 
-/// 双指数移动平均线 (DEMA)
-#[pyfunction] 
-#[pyo3(signature = (series, period=20))]
-pub fn dema(series: PySeries, period: usize) -> PyResult<PySeries> {
+/// 布林带 (BBAND) - Python 导出函数
+/// 计算上轨、中轨、下轨
+#[pyfunction]
+#[pyo3(signature = (series, period=20, std_dev=2.0))]
+pub fn bband(series: PySeries, period: usize, std_dev: f64) -> PyResult<(PySeries, PySeries, PySeries)> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+    let (upper, middle, lower) = calculate_bband(&s, period, std_dev)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("BBAND 计算失败: {}", e)))?;
+    Ok((PySeries(upper), PySeries(middle), PySeries(lower)))
+}
+
+/// 双指数移动平均线 (DEMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_dema(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     // 计算第一次EMA
-    let ema1_values = calculate_ma(&vec_values, period, MAType::EMA);
+    let ema1_values = ma_helper(&vec_values, period, MAType::EMA);
     let ema1_f64: Vec<f64> = ema1_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
     
     // 计算第二次EMA
-    let ema2_values = calculate_ma(&ema1_f64, period, MAType::EMA);
+    let ema2_values = ma_helper(&ema1_f64, period, MAType::EMA);
     let ema2_f64: Vec<f64> = ema2_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
     
     // DEMA = 2 * EMA1 - EMA2
@@ -331,128 +413,94 @@ pub fn dema(series: PySeries, period: usize) -> PyResult<PySeries> {
         .map(|(&ema1, &ema2)| 2.0 * ema1 - ema2)
         .collect();
     
-    let result = Series::new(s.name().clone(), dema_values);
+    Ok(Series::new(series.name().clone(), dema_values))
+}
+
+/// 双指数移动平均线 (DEMA) - Python 导出函数
+#[pyfunction] 
+#[pyo3(signature = (series, period=20))]
+pub fn dema(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_dema(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("DEMA 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 指数移动平均线 (EMA)
+/// 指数移动平均线 (EMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_ema(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let result = ma_helper(&vec_values, period, MAType::EMA);
+    let output: Vec<f64> = result.into_iter().map(|opt| opt.unwrap_or(f64::NAN)).collect();
+    Ok(Series::new(series.name().clone(), output))
+}
+
+/// 指数移动平均线 (EMA) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn ema(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
-    let len = values.len();
-    let mut output = vec![f64::NAN; len];
-    
-    if period == 0 || period > len {
-        return Ok(PySeries(Series::new(s.name().clone(), output)));
-    }
-    
-    // 快速路径：连续内存访问
-    if let Ok(input) = values.cont_slice() {
-        let alpha = 2.0 / (period + 1) as f64;
-        let one_minus_alpha = 1.0 - alpha;
-        
-        // 使用 SMA 作为初始值
-        let mut sum = 0.0;
-        for i in 0..period {
-            sum += input[i];
-        }
-        let mut ema = sum / period as f64;
-        output[period - 1] = ema;
-        
-        // 指数平滑计算
-        for i in period..len {
-            ema = alpha * input[i] + one_minus_alpha * ema;
-            output[i] = ema;
-        }
-    } else {
-        // Fallback: 处理非连续数组
-        let vec_values: Vec<f64> = values.into_iter()
-            .map(|opt| opt.unwrap_or(0.0))
-            .collect();
-        
-        let alpha = 2.0 / (period + 1) as f64;
-        let one_minus_alpha = 1.0 - alpha;
-        
-        let mut sum = 0.0;
-        for i in 0..period {
-            sum += vec_values[i];
-        }
-        let mut ema = sum / period as f64;
-        output[period - 1] = ema;
-        
-        for i in period..len {
-            ema = alpha * vec_values[i] + one_minus_alpha * ema;
-            output[i] = ema;
-        }
-    }
-    
-    Ok(PySeries(Series::new(s.name().clone(), output)))
+    let result = calculate_ema(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("EMA 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
-/// 考夫曼自适应移动平均 (KAMA)
-#[pyfunction]
-#[pyo3(signature = (series, period=14))]
-pub fn kama(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 考夫曼自适应移动平均 (KAMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_kama(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let len = values.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        let result_series = Series::new(s.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(series.name().clone(), result));
     }
     
-    // Zero-copy optimization
     if let Ok(arr) = values.cont_slice() {
-        // Pre-compute all price differences (avoid repeated calculation)
         let mut diffs = vec![0.0; len];
         for i in 1..len {
             diffs[i] = (arr[i] - arr[i - 1]).abs();
         }
         
-        // Initialize first volatility window
         let mut volatility = 0.0;
         for i in 1..=period {
             volatility += diffs[i];
         }
         
-        // First KAMA value
         let change = (arr[period] - arr[0]).abs();
         let er = if volatility != 0.0 { change / volatility } else { 0.0 };
         
-        const FASTEST_SC: f64 = 2.0 / 3.0;   // EMA period 2
-        const SLOWEST_SC: f64 = 2.0 / 31.0;  // EMA period 30
+        const FASTEST_SC: f64 = 2.0 / 3.0;
+        const SLOWEST_SC: f64 = 2.0 / 31.0;
         const SC_RANGE: f64 = FASTEST_SC - SLOWEST_SC;
         
         let _sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
         let mut kama = arr[period];
         result[period] = Some(kama);
         
-        // Sliding window for volatility
         for i in (period + 1)..len {
-            // Update volatility: subtract oldest, add newest
             volatility = volatility - diffs[i - period] + diffs[i];
-            
-            // Calculate ER with new volatility
             let change = (arr[i] - arr[i - period]).abs();
             let er = if volatility != 0.0 { change / volatility } else { 0.0 };
-            
-            // Calculate SC and update KAMA
             let sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
             kama = kama + sc * (arr[i] - kama);
             result[i] = Some(kama);
         }
     } else {
-        // Fallback
         let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-        
         let mut diffs = vec![0.0; len];
         for i in 1..len {
             diffs[i] = (vec_values[i] - vec_values[i - 1]).abs();
@@ -476,56 +524,76 @@ pub fn kama(series: PySeries, period: usize) -> PyResult<PySeries> {
         
         for i in (period + 1)..len {
             volatility = volatility - diffs[i - period] + diffs[i];
-            
             let change = (vec_values[i] - vec_values[i - period]).abs();
             let er = if volatility != 0.0 { change / volatility } else { 0.0 };
-            
             let sc = (er * SC_RANGE + SLOWEST_SC).powi(2);
             kama = kama + sc * (vec_values[i] - kama);
             result[i] = Some(kama);
         }
     }
     
-    let result_series = Series::new(s.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(series.name().clone(), result))
 }
 
-/// 移动平均 (MA) - 支持 SMA、EMA、WMA
+/// 考夫曼自适应移动平均 (KAMA) - Python 导出函数
 #[pyfunction]
-#[pyo3(signature = (series, period=20, ma_type="SMA"))]
-pub fn ma(series: PySeries, period: usize, ma_type: &str) -> PyResult<PySeries> {
+#[pyo3(signature = (series, period=14))]
+pub fn kama(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("输入必须是数值类型: {}", e)))?;
+    let result = calculate_kama(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("KAMA 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 移动平均 (MA) - Rust 内部函数
+/// 支持 SMA、EMA、WMA
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// - `ma_type`: MA类型 ("SMA", "EMA", "WMA")
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_ma_typed(series: &Series, period: usize, ma_type: &str) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
-    let vec_values: Vec<f64> = values.into_iter()
-        .map(|opt| opt.unwrap_or(0.0))
-        .collect();
-    
-    // 解析 MA 类型
     let ma_type_enum = match ma_type.to_uppercase().as_str() {
         "SMA" => MAType::SMA,
         "EMA" => MAType::EMA,
         "WMA" => MAType::WMA,
-        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("不支持的 MA 类型: {}。支持的类型: SMA, EMA, WMA", ma_type)
+        _ => return Err(PolarsError::ComputeError(
+            format!("不支持的 MA 类型: {}。支持的类型: SMA, EMA, WMA", ma_type).into()
         )),
     };
     
-    let ma_values = calculate_ma(&vec_values, period, ma_type_enum);
-    let result = Series::new(s.name().clone(), ma_values);
-    
+    let ma_values = ma_helper(&vec_values, period, ma_type_enum);
+    Ok(Series::new(series.name().clone(), ma_values))
+}
+
+/// 移动平均 (MA) - Python 导出函数
+/// 支持 SMA、EMA、WMA
+#[pyfunction]
+#[pyo3(signature = (series, period=20, ma_type="SMA"))]
+pub fn ma(series: PySeries, period: usize, ma_type: &str) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_ma_typed(&s, period, ma_type)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MA 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// MESA 自适应移动平均 (MAMA) - 完整版本
-#[pyfunction]
-#[pyo3(signature = (series, fast_limit=0.5, slow_limit=0.05))]
-pub fn mama(series: PySeries, fast_limit: f64, slow_limit: f64) -> PyResult<(PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// MESA 自适应移动平均 (MAMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `fast_limit`: 快速限制
+/// - `slow_limit`: 慢速限制
+/// 
+/// # 返回
+/// (MAMA, FAMA) Series 元组
+pub fn calculate_mama(series: &Series, fast_limit: f64, slow_limit: f64) -> PolarsResult<(Series, Series)> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     let n = vec_values.len();
     
@@ -545,118 +613,102 @@ pub fn mama(series: PySeries, fast_limit: f64, slow_limit: f64) -> PyResult<(PyS
         let mut delta_phase = vec![0.0; n];
         
         if n < 7 {
-            // 数据不足，返回原始值
             for i in 0..n {
                 mama[i] = Some(vec_values[i]);
                 fama[i] = Some(vec_values[i]);
             }
         } else {
-        
-        // 初始化前7个值
-        for i in 0..7 {
-            mama[i] = Some(vec_values[i]);
-            fama[i] = Some(vec_values[i]);
-        }
-        
-        // MESA算法主循环
-        for i in 7..n {
-            // 平滑价格数据 (4阶数字滤波器)
-            smooth[i] = (4.0 * vec_values[i] + 3.0 * vec_values[i-1] + 2.0 * vec_values[i-2] + vec_values[i-3]) / 10.0;
-            
-            // 计算周期测量的去趋势化
-            detrender[i] = (0.0962 * smooth[i] + 0.5769 * smooth[i-2] - 0.5769 * smooth[i-4] - 0.0962 * smooth[i-6]) * (0.075 * period[i-1] + 0.54);
-            
-            // 计算同相和正交分量
-            q1[i] = (0.0962 * detrender[i] + 0.5769 * detrender[i-2] - 0.5769 * detrender[i-4] - 0.0962 * detrender[i-6]) * (0.075 * period[i-1] + 0.54);
-            i1[i] = detrender[i-3];
-            
-            // 提前Hilbert变换器的输入
-            let j_i = (0.0962 * i1[i] + 0.5769 * i1[i-2] - 0.5769 * i1[i-4] - 0.0962 * i1[i-6]) * (0.075 * period[i-1] + 0.54);
-            let j_q = (0.0962 * q1[i] + 0.5769 * q1[i-2] - 0.5769 * q1[i-4] - 0.0962 * q1[i-6]) * (0.075 * period[i-1] + 0.54);
-            
-            // 引导帧的同相和正交分量
-            i2[i] = i1[i] - j_q;
-            q2[i] = q1[i] + j_i;
-            
-            // 平滑I和Q分量
-            i2[i] = 0.2 * i2[i] + 0.8 * i2[i-1];
-            q2[i] = 0.2 * q2[i] + 0.8 * q2[i-1];
-            
-            // 霍模德调制鉴别器
-            re[i] = i2[i] * i2[i-1] + q2[i] * q2[i-1];
-            im[i] = i2[i] * q2[i-1] - q2[i] * i2[i-1];
-            
-            re[i] = 0.2 * re[i] + 0.8 * re[i-1];
-            im[i] = 0.2 * im[i] + 0.8 * im[i-1];
-            
-            // 计算瞬时周期
-            if i1[i] != 0.0 && q1[i] != 0.0 {
-                period[i] = 6.28318 / im[i].atan2(re[i]);
+            for i in 0..7 {
+                mama[i] = Some(vec_values[i]);
+                fama[i] = Some(vec_values[i]);
             }
             
-            if period[i] > 1.5 * period[i-1] {
-                period[i] = 1.5 * period[i-1];
+            for i in 7..n {
+                smooth[i] = (4.0 * vec_values[i] + 3.0 * vec_values[i-1] + 2.0 * vec_values[i-2] + vec_values[i-3]) / 10.0;
+                detrender[i] = (0.0962 * smooth[i] + 0.5769 * smooth[i-2] - 0.5769 * smooth[i-4] - 0.0962 * smooth[i-6]) * (0.075 * period[i-1] + 0.54);
+                q1[i] = (0.0962 * detrender[i] + 0.5769 * detrender[i-2] - 0.5769 * detrender[i-4] - 0.0962 * detrender[i-6]) * (0.075 * period[i-1] + 0.54);
+                i1[i] = detrender[i-3];
+                
+                let j_i = (0.0962 * i1[i] + 0.5769 * i1[i-2] - 0.5769 * i1[i-4] - 0.0962 * i1[i-6]) * (0.075 * period[i-1] + 0.54);
+                let j_q = (0.0962 * q1[i] + 0.5769 * q1[i-2] - 0.5769 * q1[i-4] - 0.0962 * q1[i-6]) * (0.075 * period[i-1] + 0.54);
+                
+                i2[i] = i1[i] - j_q;
+                q2[i] = q1[i] + j_i;
+                i2[i] = 0.2 * i2[i] + 0.8 * i2[i-1];
+                q2[i] = 0.2 * q2[i] + 0.8 * q2[i-1];
+                
+                re[i] = i2[i] * i2[i-1] + q2[i] * q2[i-1];
+                im[i] = i2[i] * q2[i-1] - q2[i] * i2[i-1];
+                re[i] = 0.2 * re[i] + 0.8 * re[i-1];
+                im[i] = 0.2 * im[i] + 0.8 * im[i-1];
+                
+                if i1[i] != 0.0 && q1[i] != 0.0 {
+                    period[i] = 6.28318 / im[i].atan2(re[i]);
+                }
+                
+                if period[i] > 1.5 * period[i-1] {
+                    period[i] = 1.5 * period[i-1];
+                }
+                if period[i] < 0.67 * period[i-1] {
+                    period[i] = 0.67 * period[i-1];
+                }
+                if period[i] < 6.0 {
+                    period[i] = 6.0;
+                }
+                if period[i] > 50.0 {
+                    period[i] = 50.0;
+                }
+                
+                period[i] = 0.2 * period[i] + 0.8 * period[i-1];
+                
+                if i1[i] != 0.0 {
+                    phase[i] = (q1[i] / i1[i]).atan() * 57.2958;
+                }
+                
+                delta_phase[i] = phase[i-1] - phase[i];
+                if delta_phase[i] < 1.0 {
+                    delta_phase[i] = 1.0;
+                }
+                
+                let alpha = fast_limit / delta_phase[i];
+                let alpha = if alpha < slow_limit { slow_limit } else { alpha };
+                let alpha = if alpha > fast_limit { fast_limit } else { alpha };
+                
+                let prev_mama = mama[i-1].unwrap_or(vec_values[i]);
+                let prev_fama = fama[i-1].unwrap_or(vec_values[i]);
+                
+                let new_mama = alpha * vec_values[i] + (1.0 - alpha) * prev_mama;
+                let new_fama = 0.5 * alpha * new_mama + (1.0 - 0.5 * alpha) * prev_fama;
+                
+                mama[i] = Some(new_mama);
+                fama[i] = Some(new_fama);
             }
-            if period[i] < 0.67 * period[i-1] {
-                period[i] = 0.67 * period[i-1];
-            }
-            if period[i] < 6.0 {
-                period[i] = 6.0;
-            }
-            if period[i] > 50.0 {
-                period[i] = 50.0;
-            }
-            
-            period[i] = 0.2 * period[i] + 0.8 * period[i-1];
-            
-            // 计算相位
-            if i1[i] != 0.0 {
-                phase[i] = (q1[i] / i1[i]).atan() * 57.2958; // 转换为度数
-            }
-            
-            delta_phase[i] = phase[i-1] - phase[i];
-            if delta_phase[i] < 1.0 {
-                delta_phase[i] = 1.0;
-            }
-            
-            // 计算自适应因子
-            let alpha = fast_limit / delta_phase[i];
-            let alpha = if alpha < slow_limit { slow_limit } else { alpha };
-            let alpha = if alpha > fast_limit { fast_limit } else { alpha };
-            
-            // 计算MAMA和FAMA
-            let prev_mama = mama[i-1].unwrap_or(vec_values[i]);
-            let prev_fama = fama[i-1].unwrap_or(vec_values[i]);
-            
-            let new_mama = alpha * vec_values[i] + (1.0 - alpha) * prev_mama;
-            let new_fama = 0.5 * alpha * new_mama + (1.0 - 0.5 * alpha) * prev_fama;
-            
-            mama[i] = Some(new_mama);
-            fama[i] = Some(new_fama);
-        }
         }
         
         (mama, fama)
     };
     
-    let base_name = s.name();
+    let base_name = series.name();
     let mama_series = Series::new(PlSmallStr::from_str(&format!("{}_mama", base_name)), mama_values);
     let fama_series = Series::new(PlSmallStr::from_str(&format!("{}_fama", base_name)), fama_values);
     
-    Ok((PySeries(mama_series), PySeries(fama_series)))
+    Ok((mama_series, fama_series))
+}
+
+/// MESA 自适应移动平均 (MAMA) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (series, fast_limit=0.5, slow_limit=0.05))]
+pub fn mama(series: PySeries, fast_limit: f64, slow_limit: f64) -> PyResult<(PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (mama, fama) = calculate_mama(&s, fast_limit, slow_limit)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MAMA 计算失败: {}", e)))?;
+    Ok((PySeries(mama), PySeries(fama)))
 }
 
 /// 变周期移动平均 (MAVP)
-#[pyfunction]
-#[pyo3(signature = (series, periods, min_period=2, max_period=30))]
-pub fn mavp(series: PySeries, periods: PySeries, min_period: usize, max_period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let p: Series = periods.into();
-    
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Values must be numeric: {}", e)))?;
-    let period_values = p.i64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Periods must be integer: {}", e)))?;
+pub fn calculate_mavp(series: &Series, periods: &Series, min_period: usize, max_period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let period_values = periods.i64()?;
     
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     let vec_periods: Vec<usize> = period_values.into_iter()
@@ -678,78 +730,57 @@ pub fn mavp(series: PySeries, periods: PySeries, min_period: usize, max_period: 
         result
     };
     
-    let result = Series::new(s.name().clone(), mavp_values);
+    Ok(Series::new(series.name().clone(), mavp_values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, periods, min_period=2, max_period=30))]
+pub fn mavp(series: PySeries, periods: PySeries, min_period: usize, max_period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let p: Series = periods.into();
+    let result = calculate_mavp(&s, &p, min_period, max_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MAVP 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 简单移动平均线 (SMA)
+/// 简单移动平均线 (SMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_sma(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let result = ma_helper(&vec_values, period, MAType::SMA);
+    let output: Vec<f64> = result.into_iter().map(|opt| opt.unwrap_or(f64::NAN)).collect();
+    Ok(Series::new(series.name().clone(), output))
+}
+
+/// 简单移动平均线 (SMA) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn sma(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+    let result = calculate_sma(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("SMA 计算失败: {}", e)))?;
     
-    let len = values.len();
-    let mut output = vec![f64::NAN; len];
-    
-    if period == 0 || period > len {
-        return Ok(PySeries(Series::new(s.name().clone(), output)));
-    }
-    
-    // 快速路径：连续内存访问
-    if let Ok(input) = values.cont_slice() {
-        // 初始化累加和
-        let mut period_total = 0.0;
-        let lookback = period - 1;
-        let inv_period = 1.0 / period as f64;
-        
-        for i in 0..lookback {
-            period_total += input[i];
-        }
-        
-        // 滑动窗口增量计算
-        let mut trailing_idx = 0;
-        for i in lookback..len {
-            period_total += input[i];              // 加入新值
-            output[i] = period_total * inv_period; // 乘法比除法快
-            period_total -= input[trailing_idx];   // 移除旧值
-            trailing_idx += 1;
-        }
-    } else {
-        // Fallback: 处理非连续数组（带 null 检查）
-        let vec_values: Vec<f64> = values.into_iter()
-            .map(|opt| opt.unwrap_or(0.0))
-            .collect();
-        
-        let mut period_total = 0.0;
-        let lookback = period - 1;
-        let inv_period = 1.0 / period as f64;
-        
-        for i in 0..lookback {
-            period_total += vec_values[i];
-        }
-        
-        let mut trailing_idx = 0;
-        for i in lookback..len {
-            period_total += vec_values[i];
-            output[i] = period_total * inv_period;
-            period_total -= vec_values[trailing_idx];
-            trailing_idx += 1;
-        }
-    }
-    
-    Ok(PySeries(Series::new(s.name().clone(), output)))
+    Ok(PySeries(result))
 }
 
-/// T3移动平均 (T3)
-#[pyfunction]
-#[pyo3(signature = (series, period=14, volume_factor=0.7))]
-pub fn t3(series: PySeries, period: usize, volume_factor: f64) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// T3移动平均 (T3) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// - `volume_factor`: 体积因子
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_t3(series: &Series, period: usize, volume_factor: f64) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let t3_values: Vec<Option<f64>> = {
@@ -760,27 +791,27 @@ pub fn t3(series: PySeries, period: usize, volume_factor: f64) -> PyResult<PySer
         let c4 = 1.0 + 3.0 * volume_factor + volume_factor.powi(3) + 3.0 * volume_factor.powi(2);
         
         // 第一次EMA
-        let ema1_values = calculate_ma(&vec_values, period, MAType::EMA);
+        let ema1_values = ma_helper(&vec_values, period, MAType::EMA);
         let ema1: Vec<f64> = ema1_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 第二次EMA
-        let ema2_values = calculate_ma(&ema1, period, MAType::EMA);
+        let ema2_values = ma_helper(&ema1, period, MAType::EMA);
         let ema2: Vec<f64> = ema2_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 第三次EMA
-        let ema3_values = calculate_ma(&ema2, period, MAType::EMA);
+        let ema3_values = ma_helper(&ema2, period, MAType::EMA);
         let ema3: Vec<f64> = ema3_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 第四次EMA
-        let ema4_values = calculate_ma(&ema3, period, MAType::EMA);
+        let ema4_values = ma_helper(&ema3, period, MAType::EMA);
         let ema4: Vec<f64> = ema4_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 第五次EMA
-        let ema5_values = calculate_ma(&ema4, period, MAType::EMA);
+        let ema5_values = ma_helper(&ema4, period, MAType::EMA);
         let ema5: Vec<f64> = ema5_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 第六次EMA
-        let ema6_values = calculate_ma(&ema5, period, MAType::EMA);
+        let ema6_values = ma_helper(&ema5, period, MAType::EMA);
         let ema6: Vec<f64> = ema6_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
         // 计算T3 = c1*EMA6 + c2*EMA5 + c3*EMA4 + c4*EMA3
@@ -793,31 +824,42 @@ pub fn t3(series: PySeries, period: usize, volume_factor: f64) -> PyResult<PySer
         }).collect()
     };
     
-    let result = Series::new(s.name().clone(), t3_values);
+    Ok(Series::new(series.name().clone(), t3_values))
+}
+
+/// T3移动平均 (T3) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (series, period=14, volume_factor=0.7))]
+pub fn t3(series: PySeries, period: usize, volume_factor: f64) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_t3(&s, period, volume_factor)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("T3 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 三重指数移动平均 (TEMA)
-#[pyfunction]
-#[pyo3(signature = (series, period=20))]
-pub fn tema(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 三重指数移动平均 (TEMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_tema(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let tema_values: Vec<f64> = {
         // 计算第一次EMA
-        let ema1_values = calculate_ma(&vec_values, period, MAType::EMA);
+        let ema1_values = ma_helper(&vec_values, period, MAType::EMA);
         let ema1_f64: Vec<f64> = ema1_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
         
         // 计算第二次EMA
-        let ema2_values = calculate_ma(&ema1_f64, period, MAType::EMA);
+        let ema2_values = ma_helper(&ema1_f64, period, MAType::EMA);
         let ema2_f64: Vec<f64> = ema2_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
         
         // 计算第三次EMA
-        let ema3_values = calculate_ma(&ema2_f64, period, MAType::EMA);
+        let ema3_values = ma_helper(&ema2_f64, period, MAType::EMA);
         let ema3_f64: Vec<f64> = ema3_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
         
         // TEMA = 3*EMA1 - 3*EMA2 + EMA3
@@ -826,25 +868,35 @@ pub fn tema(series: PySeries, period: usize) -> PyResult<PySeries> {
             .collect()
     };
     
-    let result = Series::new(s.name().clone(), tema_values);
+    Ok(Series::new(series.name().clone(), tema_values))
+}
+
+/// 三重指数移动平均 (TEMA) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (series, period=20))]
+pub fn tema(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_tema(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("TEMA 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 三角移动平均 (TRIMA)
 /// TRIMA(period=4) = (1*a + 2*b + 2*c + 1*d) / 6
-#[pyfunction]
-#[pyo3(signature = (series, period=20))]
-pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_trima(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
     if len < period {
-        let result = Series::new(s.name().clone(), output);
-        return Ok(PySeries(result));
+        return Ok(Series::new(series.name().clone(), output));
     }
     
     if let Ok(input) = values.cont_slice() {
@@ -899,93 +951,69 @@ pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
     } else {
         // Fallback
         let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-        let sma1_values = calculate_ma(&vec_values, period, MAType::SMA);
+        let sma1_values = ma_helper(&vec_values, period, MAType::SMA);
         let sma1_f64: Vec<f64> = sma1_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
         let sma2_period = if period % 2 == 1 { (period + 1) / 2 } else { period / 2 + 1 };
-        let sma2_values = calculate_ma(&sma1_f64, sma2_period, MAType::SMA);
+        let sma2_values = ma_helper(&sma1_f64, sma2_period, MAType::SMA);
         for (i, val) in sma2_values.iter().enumerate() {
             output[i] = val.unwrap_or(f64::NAN);
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+/// 三角移动平均 (TRIMA) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (series, period=20))]
+pub fn trima(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_trima(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("TRIMA 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 加权移动平均 (WMA)
+/// 加权移动平均 (WMA) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_wma(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let result = ma_helper(&vec_values, period, MAType::WMA);
+    let output: Vec<f64> = result.into_iter().map(|opt| opt.unwrap_or(f64::NAN)).collect();
+    Ok(Series::new(series.name().clone(), output))
+}
+
+/// 加权移动平均 (WMA) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (series, period=20))]
 pub fn wma(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
-    let len = values.len();
-    let mut output = vec![f64::NAN; len];
-    
-    if len < period {
-        let result = Series::new(s.name().clone(), output);
-        return Ok(PySeries(result));
-    }
-    
-    let weight_sum = (period * (period + 1) / 2) as f64;
-    let inv_weight_sum = 1.0 / weight_sum;
-    let period_f64 = period as f64;
-    
-    // 连续内存访问
-    if let Ok(input) = values.cont_slice() {
-        // 第一个窗口
-        let mut weighted_sum = 0.0;
-        for j in 0..period {
-            weighted_sum += input[j] * (j + 1) as f64;
-        }
-        output[period - 1] = weighted_sum * inv_weight_sum;
-        
-        // 滑动窗口
-        let mut sum_values: f64 = input[..period].iter().sum();
-        
-        for i in period..len {
-            weighted_sum = weighted_sum - sum_values + input[i] * period_f64;
-            sum_values = sum_values - input[i - period] + input[i];
-            output[i] = weighted_sum * inv_weight_sum;
-        }
-    } else {
-        // fallback
-        let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-        
-        let mut weighted_sum = 0.0;
-        for j in 0..period {
-            weighted_sum += vec_values[j] * (j + 1) as f64;
-        }
-        output[period - 1] = weighted_sum * inv_weight_sum;
-        
-        let mut sum_values = vec_values[..period].iter().sum::<f64>();
-        
-        for i in period..len {
-            weighted_sum = weighted_sum - sum_values + vec_values[i] * period_f64;
-            sum_values = sum_values - vec_values[i - period] + vec_values[i];
-            output[i] = weighted_sum * inv_weight_sum;
-        }
-    }
-    
-    let result = Series::new(s.name().clone(), output);
+    let result = calculate_wma(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("WMA 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 中点 (MIDPOINT)
-#[pyfunction]
-#[pyo3(signature = (series, period=14))]
-pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 中点 (MIDPOINT) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_midpoint(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let len = values.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period > len {
-        let result_series = Series::new(s.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(series.name().clone(), result));
     }
     
     let inv_2 = 0.5;
@@ -1050,26 +1078,37 @@ pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result_series = Series::new(s.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(series.name().clone(), result))
 }
 
-/// 中间价格 (MIDPRICE) - 针对high/low序列
+/// 中点 (MIDPOINT) - Python 导出函数
 #[pyfunction]
-#[pyo3(signature = (high, low, period=14))]
-pub fn midprice_hl(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+#[pyo3(signature = (series, period=14))]
+pub fn midpoint(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_midpoint(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MIDPOINT 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 中间价格 (MIDPRICE) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_midprice(high: &Series, low: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     
     let len = high_vals.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period > len {
-        let result_series = Series::new(h.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(high.name().clone(), result));
     }
     
     // 连续内存访问
@@ -1107,26 +1146,39 @@ pub fn midprice_hl(high: PySeries, low: PySeries, period: usize) -> PyResult<PyS
         }
     }
     
-    let result_series = Series::new(h.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(high.name().clone(), result))
 }
 
-/// 抛物线SAR (SAR)
+/// 中间价格 (MIDPRICE) - Python 导出函数
 #[pyfunction]
-#[pyo3(signature = (high, low, acceleration=0.02, maximum=0.2))]
-pub fn sar(high: PySeries, low: PySeries, acceleration: f64, maximum: f64) -> PyResult<PySeries> {
+#[pyo3(signature = (high, low, period=14))]
+pub fn midprice_hl(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+    let result = calculate_midprice(&h, &l, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MIDPRICE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 抛物线SAR (SAR) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `acceleration`: 加速因子
+/// - `maximum`: 最大加速因子
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_sar(high: &Series, low: &Series, acceleration: f64, maximum: f64) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     let len = high_vals.len();
     
     let mut sar_values = vec![None; len];
     
     if len < 2 {
-        let result = Series::new(h.name().clone(), sar_values);
-        return Ok(PySeries(result));
+        return Ok(Series::new(high.name().clone(), sar_values));
     }
     
     // 连续内存访问
@@ -1222,60 +1274,69 @@ pub fn sar(high: PySeries, low: PySeries, acceleration: f64, maximum: f64) -> Py
         }
     }
     
-    let result = Series::new(h.name().clone(), sar_values);
+    Ok(Series::new(high.name().clone(), sar_values))
+}
+
+/// 抛物线SAR (SAR) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (high, low, acceleration=0.02, maximum=0.2))]
+pub fn sar(high: PySeries, low: PySeries, acceleration: f64, maximum: f64) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let result = calculate_sar(&h, &l, acceleration, maximum)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("SAR 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-// 抛物线SAR扩展版本
-#[pyfunction]
-#[pyo3(signature = (high, low, startvalue=None, offsetonreverse=None, accelerationinitlong=None, accelerationlong=None, accelerationmaxlong=None, accelerationinitshort=None, accelerationshort=None, accelerationmaxshort=None))]
-pub fn sarext(
-    high: PySeries, 
-    low: PySeries, 
-    startvalue: Option<f64>, 
-    offsetonreverse: Option<f64>,
-    accelerationinitlong: Option<f64>,
-    accelerationlong: Option<f64>,
-    accelerationmaxlong: Option<f64>,
-    accelerationinitshort: Option<f64>,
-    accelerationshort: Option<f64>,
-    accelerationmaxshort: Option<f64>
-) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+// 抛物线SAR扩展版本 - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `startvalue`: 起始值
+/// - `offsetonreverse`: 反转偏移
+/// - `accelerationinitlong`: 多头初始加速因子
+/// - `accelerationlong`: 多头加速因子
+/// - `accelerationmaxlong`: 多头最大加速因子
+/// - `accelerationinitshort`: 空头初始加速因子
+/// - `accelerationshort`: 空头加速因子
+/// - `accelerationmaxshort`: 空头最大加速因子
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_sarext(
+    high: &Series,
+    low: &Series,
+    startvalue: f64,
+    offsetonreverse: f64,
+    accelerationinitlong: f64,
+    accelerationlong: f64,
+    accelerationmaxlong: f64,
+    accelerationinitshort: f64,
+    accelerationshort: f64,
+    accelerationmaxshort: f64
+) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     let len = high_vals.len();
-    
-    // 设置默认参数
-    let start_value = startvalue.unwrap_or(0.0);
-    let offset_on_reverse = offsetonreverse.unwrap_or(0.0);
-    let accel_init_long = accelerationinitlong.unwrap_or(0.02);
-    let accel_long = accelerationlong.unwrap_or(0.02);
-    let accel_max_long = accelerationmaxlong.unwrap_or(0.2);
-    let accel_init_short = accelerationinitshort.unwrap_or(0.02);
-    let accel_short = accelerationshort.unwrap_or(0.02);
-    let accel_max_short = accelerationmaxshort.unwrap_or(0.2);
     
     let mut sar_values = vec![None; len];
     
     if len < 2 {
-        let result = Series::new(h.name().clone(), sar_values);
-        return Ok(PySeries(result));
+        return Ok(Series::new(high.name().clone(), sar_values));
     }
     
     // 连续内存访问
     if let (Ok(h_arr), Ok(l_arr)) = (high_vals.cont_slice(), low_vals.cont_slice()) {
         // 初始化SAR参数
-        let initial_sar = if start_value == 0.0 {
+        let initial_sar = if startvalue == 0.0 {
             l_arr[0]
         } else {
-            start_value
+            startvalue
         };
         let mut sar = initial_sar;
         let mut ep = h_arr[0]; // 极值点
-        let mut af = accel_init_long; // 加速因子
+        let mut af = accelerationinitlong; // 加速因子
         let mut is_bull = true; // 是否为上升趋势
         
         sar_values[0] = Some(sar);
@@ -1289,14 +1350,14 @@ pub fn sarext(
                 if l_arr[i] <= sar {
                     // 趋势反转到下降
                     is_bull = false;
-                    sar = ep + offset_on_reverse;
+                    sar = ep + offsetonreverse;
                     ep = l_arr[i];
-                    af = accel_init_short;
+                    af = accelerationinitshort;
                 } else {
                     // 继续上升趋势
                     if h_arr[i] > ep {
                         ep = h_arr[i];
-                        af = (af + accel_long).min(accel_max_long);
+                        af = (af + accelerationlong).min(accelerationmaxlong);
                     }
                     // 确保SAR不超过前两个周期的低点
                     if i >= 2 {
@@ -1310,14 +1371,14 @@ pub fn sarext(
                 if h_arr[i] >= sar {
                     // 趋势反转到上升
                     is_bull = true;
-                    sar = ep - offset_on_reverse;
+                    sar = ep - offsetonreverse;
                     ep = h_arr[i];
-                    af = accel_init_long;
+                    af = accelerationinitlong;
                 } else {
                     // 继续下降趋势
                     if l_arr[i] < ep {
                         ep = l_arr[i];
-                        af = (af + accel_short).min(accel_max_short);
+                        af = (af + accelerationshort).min(accelerationmaxshort);
                     }
                     // 确保SAR不低于前两个周期的高点
                     if i >= 2 {
@@ -1335,14 +1396,14 @@ pub fn sarext(
         let high_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         let low_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         
-        let initial_sar = if start_value == 0.0 {
+        let initial_sar = if startvalue == 0.0 {
             low_vec[0]
         } else {
-            start_value
+            startvalue
         };
         let mut sar = initial_sar;
         let mut ep = high_vec[0];
-        let mut af = accel_init_long;
+        let mut af = accelerationinitlong;
         let mut is_bull = true;
         
         sar_values[0] = Some(sar);
@@ -1353,13 +1414,13 @@ pub fn sarext(
             if is_bull {
                 if low_vec[i] <= sar {
                     is_bull = false;
-                    sar = ep + offset_on_reverse;
+                    sar = ep + offsetonreverse;
                     ep = low_vec[i];
-                    af = accel_init_short;
+                    af = accelerationinitshort;
                 } else {
                     if high_vec[i] > ep {
                         ep = high_vec[i];
-                        af = (af + accel_long).min(accel_max_long);
+                        af = (af + accelerationlong).min(accelerationmaxlong);
                     }
                     if i >= 2 {
                         sar = sar.min(low_vec[i-1]).min(low_vec[i-2]);
@@ -1370,13 +1431,13 @@ pub fn sarext(
             } else {
                 if high_vec[i] >= sar {
                     is_bull = true;
-                    sar = ep - offset_on_reverse;
+                    sar = ep - offsetonreverse;
                     ep = high_vec[i];
-                    af = accel_init_long;
+                    af = accelerationinitlong;
                 } else {
                     if low_vec[i] < ep {
                         ep = low_vec[i];
-                        af = (af + accel_short).min(accel_max_short);
+                        af = (af + accelerationshort).min(accelerationmaxshort);
                     }
                     if i >= 2 {
                         sar = sar.max(high_vec[i-1]).max(high_vec[i-2]);
@@ -1390,7 +1451,44 @@ pub fn sarext(
         }
     }
     
-    let result = Series::new(h.name().clone(), sar_values);
+    Ok(Series::new(high.name().clone(), sar_values))
+}
+
+// 抛物线SAR扩展版本 - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (high, low, startvalue=None, offsetonreverse=None, accelerationinitlong=None, accelerationlong=None, accelerationmaxlong=None, accelerationinitshort=None, accelerationshort=None, accelerationmaxshort=None))]
+pub fn sarext(
+    high: PySeries, 
+    low: PySeries, 
+    startvalue: Option<f64>, 
+    offsetonreverse: Option<f64>,
+    accelerationinitlong: Option<f64>,
+    accelerationlong: Option<f64>,
+    accelerationmaxlong: Option<f64>,
+    accelerationinitshort: Option<f64>,
+    accelerationshort: Option<f64>,
+    accelerationmaxshort: Option<f64>
+) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    
+    // 设置默认参数
+    let start_value = startvalue.unwrap_or(0.0);
+    let offset_on_reverse = offsetonreverse.unwrap_or(0.0);
+    let accel_init_long = accelerationinitlong.unwrap_or(0.02);
+    let accel_long = accelerationlong.unwrap_or(0.02);
+    let accel_max_long = accelerationmaxlong.unwrap_or(0.2);
+    let accel_init_short = accelerationinitshort.unwrap_or(0.02);
+    let accel_short = accelerationshort.unwrap_or(0.02);
+    let accel_max_short = accelerationmaxshort.unwrap_or(0.2);
+    
+    let result = calculate_sarext(
+        &h, &l,
+        start_value, offset_on_reverse,
+        accel_init_long, accel_long, accel_max_long,
+        accel_init_short, accel_short, accel_max_short
+    ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("SAREXT 计算失败: {}", e)))?;
+    
     Ok(PySeries(result))
 }
 
@@ -1398,23 +1496,26 @@ pub fn sarext(
 // 动量指标 (Momentum Indicators) - 趋势强度和方向指标
 // ====================================================================
 
-/// 平均趋向指标 (ADX)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn adx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+/// 平均趋向指标 (ADX) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `close`: 收盘价 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_adx(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
     
     if len < period * 2 || period == 0 {
-        return Ok(PySeries(Series::new(c.name().clone(), result)));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -1539,24 +1640,35 @@ pub fn adx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
         }
     }
     
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 平均趋向指标评级 (ADXR)
+/// 平均趋向指标 (ADX) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (high, low, close, period=14))]
-pub fn adxr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+pub fn adx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    // 保存 name 后再 move (避免不必要的 clone)
-    let name = c.name().clone();
-    
+    let result = calculate_adx(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ADX 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 平均趋向指标评级 (ADXR) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `close`: 收盘价 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_adxr(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
     // 先计算ADX值
-    let adx_result = adx(PySeries(h), PySeries(l), PySeries(c), period)?;
-    let adx_series: Series = adx_result.into();
-    let adx_vals = adx_series.f64().unwrap();
+    let adx_series = calculate_adx(high, low, close, period)?;
+    let adx_vals = adx_series.f64()?;
     let len = adx_vals.len();
     
     let mut adxr_values = vec![None; len];
@@ -1588,22 +1700,28 @@ pub fn adxr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
         }
     }
     
-    let result = Series::new(name, adxr_values);
+    Ok(Series::new(close.name().clone(), adxr_values))
+}
+
+/// 平均趋向指标评级 (ADXR) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn adxr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_adxr(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ADXR 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 绝对价格摆动指标 (APO)
-#[pyfunction]
-#[pyo3(signature = (series, fast_period=12, slow_period=26))]
-pub fn apo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+pub fn calculate_apo(series: &Series, fast_period: usize, slow_period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
-    let fast_ema_values = calculate_ma(&vec_values, fast_period, MAType::EMA);
-    let slow_ema_values = calculate_ma(&vec_values, slow_period, MAType::EMA);
+    let fast_ema_values = ma_helper(&vec_values, fast_period, MAType::EMA);
+    let slow_ema_values = ma_helper(&vec_values, slow_period, MAType::EMA);
     
     let apo_values: Vec<Option<f64>> = fast_ema_values.iter().zip(slow_ema_values.iter())
         .map(|(&fast, &slow)| {
@@ -1614,19 +1732,22 @@ pub fn apo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult
         })
         .collect();
     
-    let result = Series::new(s.name().clone(), apo_values);
+    Ok(Series::new(series.name().clone(), apo_values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, fast_period=12, slow_period=26))]
+pub fn apo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_apo(&s, fast_period, slow_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("APO 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 阿隆指标 (AROON)
-#[pyfunction]
-#[pyo3(signature = (high, low, period=14))]
-pub fn aroon(high: PySeries, low: PySeries, period: usize) -> PyResult<(PySeries, PySeries)> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+pub fn calculate_aroon(high: &Series, low: &Series, period: usize) -> PolarsResult<(Series, Series)> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     
     let len = high_vals.len();
     let mut up_out = vec![f64::NAN; len];
@@ -1756,23 +1877,28 @@ pub fn aroon(high: PySeries, low: PySeries, period: usize) -> PyResult<(PySeries
         }
     }
     
-    let base_name = h.name();
+    let base_name = high.name();
     let up_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_up", base_name)), up_out);
     let down_series = Series::new(PlSmallStr::from_str(&format!("{}_aroon_down", base_name)), down_out);
     
+    Ok((up_series, down_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, period=14))]
+pub fn aroon(high: PySeries, low: PySeries, period: usize) -> PyResult<(PySeries, PySeries)> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let (up_series, down_series) = calculate_aroon(&h, &l, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("AROON 计算失败: {}", e)))?;
     Ok((PySeries(up_series), PySeries(down_series)))
 }
 
 /// 阿隆摆动指标 (AROONOSC)
 /// Simply reuse optimized AROON and subtract
-#[pyfunction]
-#[pyo3(signature = (high, low, period=14))]
-pub fn aroonosc(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+pub fn calculate_aroonosc(high: &Series, low: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     
     let len = high_vals.len();
     let mut output = vec![f64::NAN; len];
@@ -1898,27 +2024,30 @@ pub fn aroonosc(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeri
         }
     }
     
-    let result = Series::new(h.name().clone(), output);
+    Ok(Series::new(high.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, period=14))]
+pub fn aroonosc(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let result = calculate_aroonosc(&h, &l, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("AROONOSC 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 正方向指标 (PLUS_DI)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn plus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_plus_di(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        return Ok(PySeries(Series::new(c.name().clone(), result)));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -1999,26 +2128,31 @@ pub fn plus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) ->
         }
     }
     
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 负方向指标 (MINUS_DI)
 #[pyfunction]
 #[pyo3(signature = (high, low, close, period=14))]
-pub fn minus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+pub fn plus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+    let result = calculate_plus_di(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("PLUS_DI 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 负方向指标 (MINUS_DI)
+pub fn calculate_minus_di(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        return Ok(PySeries(Series::new(c.name().clone(), result)));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -2099,25 +2233,30 @@ pub fn minus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -
         }
     }
     
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn minus_di(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_minus_di(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MINUS_DI 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 正方向移动 (PLUS_DM)
-#[pyfunction]
-#[pyo3(signature = (high, low, period=14))]
-pub fn plus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+pub fn calculate_plus_dm(high: &Series, low: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     
     let len = high_vals.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        let result_series = Series::new(h.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(high.name().clone(), result));
     }
     
     // Zero-copy optimization
@@ -2161,26 +2300,29 @@ pub fn plus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySerie
         }
     }
     
-    let result_series = Series::new(h.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(high.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, period=14))]
+pub fn plus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let result = calculate_plus_dm(&h, &l, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("PLUS_DM 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 负方向移动 (MINUS_DM)
-#[pyfunction]
-#[pyo3(signature = (high, low, period=14))]
-pub fn minus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+pub fn calculate_minus_dm(high: &Series, low: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     
     let len = high_vals.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        let result_series = Series::new(l.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(low.name().clone(), result));
     }
     
     // Zero-copy optimization
@@ -2225,23 +2367,25 @@ pub fn minus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeri
         }
     }
     
-    let result_series = Series::new(l.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(low.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, period=14))]
+pub fn minus_dm(high: PySeries, low: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let result = calculate_minus_dm(&h, &l, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MINUS_DM 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 均势指标 (BOP)
-#[pyfunction]
-#[pyo3(signature = (open, high, low, close))]
-pub fn bop(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
-    let o: Series = open.into();
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let open_vals = o.f64().unwrap();
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_bop(open: &Series, high: &Series, low: &Series, close: &Series) -> PolarsResult<Series> {
+    let open_vals = open.f64()?;
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![0.0; len];
@@ -2275,27 +2419,29 @@ pub fn bop(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> Py
         }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 商品通道指数 (CCI)
 #[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+#[pyo3(signature = (open, high, low, close))]
+pub fn bop(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
+    let o: Series = open.into();
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    let c_name = c.name().clone();
+    let result = calculate_bop(&o, &h, &l, &c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("BOP 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 商品通道指数 (CCI)
+pub fn calculate_cci(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let c_name = close.name().clone();
     
     // 向量化计算典型价格: TP = (H + L + C) / 3
-    let h_plus_l = (&h + &l)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("h+l failed: {}", e)))?;
-    let tp = (h_plus_l + c)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("tp failed: {}", e)))?
-        .cast(&DataType::Float64)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cast failed: {}", e)))?
+    let h_plus_l = (high + low)?;
+    let tp = (&h_plus_l + close)?
+        .cast(&DataType::Float64)?
         / 3.0;
     
     // 使用 rolling_mean 计算 SMA(TP)
@@ -2306,12 +2452,11 @@ pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
         ..Default::default()
     };
     
-    let sma_tp = tp.rolling_mean(rolling_opts.clone())
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("rolling_mean failed: {}", e)))?;
+    let sma_tp = tp.rolling_mean(rolling_opts.clone())?;
     
     // 计算平均绝对偏差：需要手动循环（无原生rolling MAD）
-    let tp_vals: Vec<f64> = tp.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
-    let sma_vals: Vec<f64> = sma_tp.f64().unwrap().into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let tp_vals: Vec<f64> = tp.f64()?.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+    let sma_vals: Vec<f64> = sma_tp.f64()?.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     let cci_values = {
         let mut result = vec![None; tp_vals.len()];
@@ -2338,24 +2483,28 @@ pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
         result
     };
     
-    let result = Series::new(c_name, cci_values);
+    Ok(Series::new(c_name, cci_values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn cci(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_cci(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("CCI 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 钱德动量摆动指标 (CMO)
-#[pyfunction]
-#[pyo3(signature = (series, period=14))]
-pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+pub fn calculate_cmo(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let len = values.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period >= len {
-        let result_series = Series::new(s.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(series.name().clone(), result));
     }
     
     // 连续内存访问
@@ -2429,27 +2578,29 @@ pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result_series = Series::new(s.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(series.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=14))]
+pub fn cmo(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_cmo(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("CMO 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 方向性指标 (DX)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn dx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_dx(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
     
     if len < period + 1 {
-        return Ok(PySeries(Series::new(c.name().clone(), result)));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -2560,27 +2711,40 @@ pub fn dx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyRe
         }
     }
     
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// MACD (移动平均收敛发散指标)
 #[pyfunction]
-#[pyo3(signature = (series, fast=12, slow=26, signal=9))]
-pub fn macd(series: PySeries, fast: usize, slow: usize, signal: usize) -> PyResult<(PySeries, PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
-    let vec_values: Vec<f64> = values.into_iter()
-        .map(|opt| opt.unwrap_or(0.0))
-        .collect();
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn dx(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_dx(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("DX 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// MACD - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `fast`: 快线周期
+/// - `slow`: 慢线周期
+/// - `signal`: 信号线周期
+/// 
+/// # 返回
+/// (DIF, DEA, MACD柱状图) Series 元组
+pub fn calculate_macd(series: &Series, fast: usize, slow: usize, signal: usize) -> PolarsResult<(Series, Series, Series)> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     // 计算快线EMA
-    let fast_ema_values = calculate_ma(&vec_values, fast, MAType::EMA);
+    let fast_ema_values = ma_helper(&vec_values, fast, MAType::EMA);
     let fast_ema: Vec<f64> = fast_ema_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算慢线EMA
-    let slow_ema_values = calculate_ma(&vec_values, slow, MAType::EMA);
+    let slow_ema_values = ma_helper(&vec_values, slow, MAType::EMA);
     let slow_ema: Vec<f64> = slow_ema_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算DIF (MACD线)
@@ -2589,7 +2753,7 @@ pub fn macd(series: PySeries, fast: usize, slow: usize, signal: usize) -> PyResu
         .collect();
     
     // 计算DEA (信号线)
-    let dea_values = calculate_ma(&dif, signal, MAType::EMA);
+    let dea_values = ma_helper(&dif, signal, MAType::EMA);
     let dea: Vec<f64> = dea_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算MACD柱状图
@@ -2597,22 +2761,27 @@ pub fn macd(series: PySeries, fast: usize, slow: usize, signal: usize) -> PyResu
         .map(|(&dif_val, &dea_val)| 2.0 * (dif_val - dea_val))
         .collect();
     
-    let base_name = s.name();
+    let base_name = series.name();
     let dif_series = Series::new(PlSmallStr::from_str(&format!("{}_macd_dif", base_name)), dif);
     let dea_series = Series::new(PlSmallStr::from_str(&format!("{}_macd_dea", base_name)), dea);
     let macd_series = Series::new(PlSmallStr::from_str(&format!("{}_macd_hist", base_name)), macd_hist);
     
-    Ok((PySeries(dif_series), PySeries(dea_series), PySeries(macd_series)))
+    Ok((dif_series, dea_series, macd_series))
+}
+
+/// MACD (移动平均收敛发散指标) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (series, fast=12, slow=26, signal=9))]
+pub fn macd(series: PySeries, fast: usize, slow: usize, signal: usize) -> PyResult<(PySeries, PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (dif, dea, hist) = calculate_macd(&s, fast, slow, signal)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MACD 计算失败: {}", e)))?;
+    Ok((PySeries(dif), PySeries(dea), PySeries(hist)))
 }
 
 /// MACD扩展 (MACDEXT) - 支持不同类型的移动平均
-#[pyfunction]
-#[pyo3(signature = (series, fast=12, slow=26, signal=9, fast_matype="EMA", slow_matype="EMA", signal_matype="EMA"))]
-pub fn macdext(series: PySeries, fast: usize, slow: usize, signal: usize, fast_matype: &str, slow_matype: &str, signal_matype: &str) -> PyResult<(PySeries, PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+pub fn calculate_macdext(series: &Series, fast: usize, slow: usize, signal: usize, fast_matype: &str, slow_matype: &str, signal_matype: &str) -> PolarsResult<(Series, Series, Series)> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     // 解析移动平均类型
@@ -2630,11 +2799,11 @@ pub fn macdext(series: PySeries, fast: usize, slow: usize, signal: usize, fast_m
     };
     
     // 计算快线MA
-    let fast_ma_values = calculate_ma(&vec_values, fast, fast_ma_type);
+    let fast_ma_values = ma_helper(&vec_values, fast, fast_ma_type);
     let fast_ma: Vec<f64> = fast_ma_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算慢线MA
-    let slow_ma_values = calculate_ma(&vec_values, slow, slow_ma_type);
+    let slow_ma_values = ma_helper(&vec_values, slow, slow_ma_type);
     let slow_ma: Vec<f64> = slow_ma_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算DIF (MACD线)
@@ -2643,7 +2812,7 @@ pub fn macdext(series: PySeries, fast: usize, slow: usize, signal: usize, fast_m
         .collect();
     
     // 计算DEA (信号线)
-    let dea_values = calculate_ma(&dif, signal, signal_ma_type);
+    let dea_values = ma_helper(&dif, signal, signal_ma_type);
     let dea: Vec<f64> = dea_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算MACD柱状图
@@ -2651,22 +2820,26 @@ pub fn macdext(series: PySeries, fast: usize, slow: usize, signal: usize, fast_m
         .map(|(&dif_val, &dea_val)| 2.0 * (dif_val - dea_val))
         .collect();
     
-    let base_name = s.name();
+    let base_name = series.name();
     let dif_series = Series::new(PlSmallStr::from_str(&format!("{}_macdext_dif", base_name)), dif);
     let dea_series = Series::new(PlSmallStr::from_str(&format!("{}_macdext_dea", base_name)), dea);
     let macd_series = Series::new(PlSmallStr::from_str(&format!("{}_macdext_hist", base_name)), macd_hist);
     
+    Ok((dif_series, dea_series, macd_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, fast=12, slow=26, signal=9, fast_matype="EMA", slow_matype="EMA", signal_matype="EMA"))]
+pub fn macdext(series: PySeries, fast: usize, slow: usize, signal: usize, fast_matype: &str, slow_matype: &str, signal_matype: &str) -> PyResult<(PySeries, PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (dif_series, dea_series, macd_series) = calculate_macdext(&s, fast, slow, signal, fast_matype, slow_matype, signal_matype)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MACDEXT 计算失败: {}", e)))?;
     Ok((PySeries(dif_series), PySeries(dea_series), PySeries(macd_series)))
 }
 
 /// MACD固定 (MACDFIX) - 固定快线周期为12
-#[pyfunction]
-#[pyo3(signature = (series, signal=9))]
-pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+pub fn calculate_macdfix(series: &Series, signal: usize) -> PolarsResult<(Series, Series, Series)> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     // 固定参数：快线12，慢线26
@@ -2674,11 +2847,11 @@ pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries,
     let slow = 26;
     
     // 计算快线EMA
-    let fast_ema_values = calculate_ma(&vec_values, fast, MAType::EMA);
+    let fast_ema_values = ma_helper(&vec_values, fast, MAType::EMA);
     let fast_ema: Vec<f64> = fast_ema_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算慢线EMA
-    let slow_ema_values = calculate_ma(&vec_values, slow, MAType::EMA);
+    let slow_ema_values = ma_helper(&vec_values, slow, MAType::EMA);
     let slow_ema: Vec<f64> = slow_ema_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算DIF (MACD线)
@@ -2687,7 +2860,7 @@ pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries,
         .collect();
     
     // 计算DEA (信号线)
-    let dea_values = calculate_ma(&dif, signal, MAType::EMA);
+    let dea_values = ma_helper(&dif, signal, MAType::EMA);
     let dea: Vec<f64> = dea_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算MACD柱状图
@@ -2695,41 +2868,42 @@ pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries,
         .map(|(&dif_val, &dea_val)| 2.0 * (dif_val - dea_val))
         .collect();
     
-    let base_name = s.name();
+    let base_name = series.name();
     let dif_series = Series::new(PlSmallStr::from_str(&format!("{}_macdfix_dif", base_name)), dif);
     let dea_series = Series::new(PlSmallStr::from_str(&format!("{}_macdfix_dea", base_name)), dea);
     let macd_series = Series::new(PlSmallStr::from_str(&format!("{}_macdfix_hist", base_name)), macd_hist);
     
+    Ok((dif_series, dea_series, macd_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, signal=9))]
+pub fn macdfix(series: PySeries, signal: usize) -> PyResult<(PySeries, PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (dif_series, dea_series, macd_series) = calculate_macdfix(&s, signal)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MACDFIX 计算失败: {}", e)))?;
     Ok((PySeries(dif_series), PySeries(dea_series), PySeries(macd_series)))
 }
 
 /// 资金流量指标 (MFI)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, volume, period=14))]
-pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    let v: Series = volume.into();
-    
+pub fn calculate_mfi(high: &Series, low: &Series, close: &Series, volume: &Series, period: usize) -> PolarsResult<Series> {
     // 将 volume 转换为 f64 类型
-    let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+    let v_f64 = if volume.dtype() == &DataType::Int64 {
+        volume.cast(&DataType::Float64)?
     } else {
-        v
+        volume.clone()
     };
     
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
-    let volume_vals = v_f64.f64().unwrap();
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
+    let volume_vals = v_f64.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period >= len {
-        let result_series = Series::new(c.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -2838,28 +3012,33 @@ pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, per
         }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 动量指标 (MOM) - 使用 Polars 原生操作优化
 #[pyfunction]
-#[pyo3(signature = (series, period=10))]
-pub fn mom(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to convert series to f64: {}", e)))?;
+#[pyo3(signature = (high, low, close, volume, period=14))]
+pub fn mfi(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let v: Series = volume.into();
+    let result = calculate_mfi(&h, &l, &c, &v, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MFI 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 动量指标 (MOM)
+pub fn calculate_mom(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝访问 + tight loop
     if let Ok(input) = values.cont_slice() {
         for i in period..len {
             output[i] = input[i] - input[i - period];
         }
     } else {
-        // fallback: 标准访问
         for i in period..len {
             if let (Some(curr), Some(prev)) = (values.get(i), values.get(i - period)) {
                 output[i] = curr - prev;
@@ -2867,22 +3046,26 @@ pub fn mom(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=10))]
+pub fn mom(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_mom(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MOM 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 价格摆动指标百分比 (PPO)
-#[pyfunction]
-#[pyo3(signature = (series, fast_period=12, slow_period=26))]
-pub fn ppo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_ppo(series: &Series, fast_period: usize, slow_period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
-    let fast_ema_values = calculate_ma(&vec_values, fast_period, MAType::EMA);
-    let slow_ema_values = calculate_ma(&vec_values, slow_period, MAType::EMA);
+    let fast_ema_values = ma_helper(&vec_values, fast_period, MAType::EMA);
+    let slow_ema_values = ma_helper(&vec_values, slow_period, MAType::EMA);
     
     let ppo_values: Vec<Option<f64>> = fast_ema_values.iter().zip(slow_ema_values.iter())
         .map(|(&fast, &slow)| {
@@ -2893,22 +3076,25 @@ pub fn ppo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult
         })
         .collect();
     
-    let result = Series::new(s.name().clone(), ppo_values);
+    Ok(Series::new(series.name().clone(), ppo_values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, fast_period=12, slow_period=26))]
+pub fn ppo(series: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_ppo(&s, fast_period, slow_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("PPO 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 变化率指标 (ROC)
-#[pyfunction]
-#[pyo3(signature = (series, period=10))]
-pub fn roc(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_roc(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop
     if let Ok(input) = values.cont_slice() {
         for i in period..len {
             let prev = input[i - period];
@@ -2926,22 +3112,25 @@ pub fn roc(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=10))]
+pub fn roc(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_roc(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ROC 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 变化率百分比 (ROCP)
-#[pyfunction]
-#[pyo3(signature = (series, period=10))]
-pub fn rocp(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_rocp(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop
     if let Ok(input) = values.cont_slice() {
         for i in period..len {
             let prev = input[i - period];
@@ -2959,22 +3148,25 @@ pub fn rocp(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=10))]
+pub fn rocp(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_rocp(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ROCP 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 变化率比率 (ROCR)
-#[pyfunction]
-#[pyo3(signature = (series, period=10))]
-pub fn rocr(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_rocr(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop
     if let Ok(input) = values.cont_slice() {
         for i in period..len {
             let prev = input[i - period];
@@ -2992,22 +3184,25 @@ pub fn rocr(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=10))]
+pub fn rocr(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_rocr(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ROCR 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 变化率比率100 (ROCR100)
-#[pyfunction]
-#[pyo3(signature = (series, period=10))]
-pub fn rocr100(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_rocr100(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let len = values.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop
     if let Ok(input) = values.cont_slice() {
         for i in period..len {
             let prev = input[i - period];
@@ -3025,42 +3220,52 @@ pub fn rocr100(series: PySeries, period: usize) -> PyResult<PySeries> {
         }
     }
     
-    let result = Series::new(s.name().clone(), output);
+    Ok(Series::new(series.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=10))]
+pub fn rocr100(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_rocr100(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ROCR100 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-/// 相对强弱指标 (RSI)
+/// 相对强弱指标 (RSI) - Rust 内部函数
+/// 
+/// # 参数
+/// - `series`: 输入 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_rsi(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    let rsi_values = rsi_helper(&vec_values, period);
+    Ok(Series::new(series.name().clone(), rsi_values))
+}
+
+/// 相对强弱指标 (RSI) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (series, period=14))]
 pub fn rsi(series: PySeries, period: usize) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-    
-    let rsi_values = calculate_rsi(&vec_values, period);
-    let result = Series::new(s.name().clone(), rsi_values);
-    
+    let result = calculate_rsi(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("RSI 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 随机指标 (STOCH)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, k_period=14, d_period=3))]
-pub fn stoch(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_stoch(high: &Series, low: &Series, close: &Series, k_period: usize, d_period: usize) -> PolarsResult<(Series, Series)> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut k_values = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop 计算%K
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         for i in k_period - 1..len {
             let start = i + 1 - k_period;
@@ -3094,32 +3299,36 @@ pub fn stoch(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_
     }
     
     // 计算%D (K的移动平均)
-    let d_values = calculate_ma(&k_values, d_period, MAType::SMA);
+    let d_values = ma_helper(&k_values, d_period, MAType::SMA);
     let d_vec: Vec<f64> = d_values.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
     
-    let base_name = h.name();
+    let base_name = high.name();
     let k_series = Series::new(PlSmallStr::from_str(&format!("{}_stoch_k", base_name)), k_values);
     let d_series = Series::new(PlSmallStr::from_str(&format!("{}_stoch_d", base_name)), d_vec);
     
+    Ok((k_series, d_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close, k_period=14, d_period=3))]
+pub fn stoch(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let (k_series, d_series) = calculate_stoch(&h, &l, &c, k_period, d_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("STOCH 计算失败: {}", e)))?;
     Ok((PySeries(k_series), PySeries(d_series)))
 }
 
 /// 快速随机指标 (STOCHF)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, k_period=14, d_period=3))]
-pub fn stochf(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_stochf(high: &Series, low: &Series, close: &Series, k_period: usize, d_period: usize) -> PolarsResult<(Series, Series)> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut fastk_values = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop 计算FastK
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         for i in k_period - 1..len {
             let start = i + 1 - k_period;
@@ -3153,23 +3362,30 @@ pub fn stochf(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d
     }
     
     // 计算FastD (FastK的移动平均)
-    let fastd_values = calculate_ma(&fastk_values, d_period, MAType::SMA);
+    let fastd_values = ma_helper(&fastk_values, d_period, MAType::SMA);
     let fastd_vec: Vec<f64> = fastd_values.iter().map(|x| x.unwrap_or(f64::NAN)).collect();
     
-    let base_name = h.name();
+    let base_name = high.name();
     let fastk_series = Series::new(PlSmallStr::from_str(&format!("{}_stochf_k", base_name)), fastk_values);
     let fastd_series = Series::new(PlSmallStr::from_str(&format!("{}_stochf_d", base_name)), fastd_vec);
     
+    Ok((fastk_series, fastd_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close, k_period=14, d_period=3))]
+pub fn stochf(high: PySeries, low: PySeries, close: PySeries, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let (fastk_series, fastd_series) = calculate_stochf(&h, &l, &c, k_period, d_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("STOCHF 计算失败: {}", e)))?;
     Ok((PySeries(fastk_series), PySeries(fastd_series)))
 }
 
 /// RSI随机指标 (STOCHRSI)
-#[pyfunction]
-#[pyo3(signature = (series, period=14, k_period=5, d_period=3))]
-pub fn stochrsi(series: PySeries, period: usize, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_stochrsi(series: &Series, period: usize, k_period: usize, d_period: usize) -> PolarsResult<(Series, Series)> {
+    let values = series.f64()?;
     
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
@@ -3235,35 +3451,40 @@ pub fn stochrsi(series: PySeries, period: usize, k_period: usize, d_period: usiz
     
     // 计算StochRSI的移动平均作为D值
     let stochrsi_vals_for_d: Vec<f64> = stochrsi_values.iter().map(|&x| x.unwrap_or(0.0)).collect();
-    let stochrsi_d_values = calculate_ma(&stochrsi_vals_for_d, d_period, MAType::SMA);
+    let stochrsi_d_values = ma_helper(&stochrsi_vals_for_d, d_period, MAType::SMA);
     
-    let base_name = s.name();
+    let base_name = series.name();
     let k_series = Series::new(PlSmallStr::from_str(&format!("{}_stochrsi_k", base_name)), stochrsi_values);
     let d_series = Series::new(PlSmallStr::from_str(&format!("{}_stochrsi_d", base_name)), stochrsi_d_values);
     
+    Ok((k_series, d_series))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=14, k_period=5, d_period=3))]
+pub fn stochrsi(series: PySeries, period: usize, k_period: usize, d_period: usize) -> PyResult<(PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (k_series, d_series) = calculate_stochrsi(&s, period, k_period, d_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("STOCHRSI 计算失败: {}", e)))?;
     Ok((PySeries(k_series), PySeries(d_series)))
 }
 
 /// 三重指数平均线 (TRIX)
-#[pyfunction]
-#[pyo3(signature = (series, period=14))]
-pub fn trix(series: PySeries, period: usize) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
+pub fn calculate_trix(series: &Series, period: usize) -> PolarsResult<Series> {
+    let values = series.f64()?;
     
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     // 第一次EMA
-    let ema1_values = calculate_ma(&vec_values, period, MAType::EMA);
+    let ema1_values = ma_helper(&vec_values, period, MAType::EMA);
     let ema1: Vec<f64> = ema1_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 第二次EMA
-    let ema2_values = calculate_ma(&ema1, period, MAType::EMA);
+    let ema2_values = ma_helper(&ema1, period, MAType::EMA);
     let ema2: Vec<f64> = ema2_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 第三次EMA
-    let ema3_values = calculate_ma(&ema2, period, MAType::EMA);
+    let ema3_values = ma_helper(&ema2, period, MAType::EMA);
     let ema3: Vec<f64> = ema3_values.into_iter().map(|x| x.unwrap_or(0.0)).collect();
     
     // 计算TRIX (EMA3的变化率)
@@ -3279,24 +3500,23 @@ pub fn trix(series: PySeries, period: usize) -> PyResult<PySeries> {
         result
     };
     
-    let result = Series::new(s.name().clone(), trix_values);
+    Ok(Series::new(series.name().clone(), trix_values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (series, period=14))]
+pub fn trix(series: PySeries, period: usize) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_trix(&s, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("TRIX 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 终极摆动指标 (ULTOSC)
-#[pyfunction]
-#[pyo3(signature = (high, low, close, period1=7, period2=14, period3=28))]
-pub fn ultosc(high: PySeries, low: PySeries, close: PySeries, period1: usize, period2: usize, period3: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
-    let low_vals = l.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
-    let close_vals = c.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
+pub fn calculate_ultosc(high: &Series, low: &Series, close: &Series, period1: usize, period2: usize, period3: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
@@ -3305,8 +3525,7 @@ pub fn ultosc(high: PySeries, low: PySeries, close: PySeries, period1: usize, pe
     let max_period = period1.max(period2).max(period3);
     
     if len <= max_period {
-        let result_series = Series::new(c.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // Zero-copy optimization
@@ -3463,29 +3682,29 @@ pub fn ultosc(high: PySeries, low: PySeries, close: PySeries, period1: usize, pe
         }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 威廉指标 (WILLR)
 #[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+#[pyo3(signature = (high, low, close, period1=7, period2=14, period3=28))]
+pub fn ultosc(high: PySeries, low: PySeries, close: PySeries, period1: usize, period2: usize, period3: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    let high_vals = h.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
-    let low_vals = l.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
-    let close_vals = c.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
+    let result = calculate_ultosc(&h, &l, &c, period1, period2, period3)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ULTOSC 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 威廉指标 (WILLR)
+pub fn calculate_willr(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut output = vec![f64::NAN; len];
     
-    // 零拷贝 + tight loop
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr)) = (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice()) {
         for i in period - 1..len {
             let start = i + 1 - period;
@@ -3520,7 +3739,17 @@ pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> P
         }
     }
     
-    let result = Series::new(c.name().clone(), output);
+    Ok(Series::new(close.name().clone(), output))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_willr(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("WILLR 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
@@ -3528,44 +3757,27 @@ pub fn willr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> P
 // 成交量指标 (Volume Indicators) - 成交量相关指标
 // ====================================================================
 
-/// 累积/派发线 (AD) - 零拷贝优化版本
-#[pyfunction]
-#[pyo3(signature = (high, low, close, volume))]
-pub fn ad(high: PySeries, low: PySeries, close: PySeries, volume: PySeries) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    let v: Series = volume.into();
-    
-    let c_name = c.name().clone();
-    
-    // 将 volume 转换为 f64 类型
-    let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+/// 累积/派发线 (AD)
+pub fn calculate_ad(high: &Series, low: &Series, close: &Series, volume: &Series) -> PolarsResult<Series> {
+    let v_f64 = if volume.dtype() == &DataType::Int64 {
+        volume.cast(&DataType::Float64)?
     } else {
-        v
+        volume.clone()
     };
     
-    let high_vals = h.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
-    let low_vals = l.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
-    let close_vals = c.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
-    let volume_vals = v_f64.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
+    let volume_vals = v_f64.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     
-    // 零拷贝访问 + tight loop
     if let (Ok(h_arr), Ok(l_arr), Ok(c_arr), Ok(v_arr)) = 
         (high_vals.cont_slice(), low_vals.cont_slice(), close_vals.cont_slice(), volume_vals.cont_slice()) {
         
         let mut cumsum = 0.0;
         
-        // Tight loop: CLV计算 + 累加
         for i in 0..len {
             let hl_diff = h_arr[i] - l_arr[i];
             if hl_diff > 0.0 {
@@ -3594,35 +3806,34 @@ pub fn ad(high: PySeries, low: PySeries, close: PySeries, volume: PySeries) -> P
         }
     }
     
-    Ok(PySeries(Series::new(c_name, result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 累积/派发摆动指标 (ADOSC)
 #[pyfunction]
-#[pyo3(signature = (high, low, close, volume, fast_period=3, slow_period=10))]
-pub fn adosc(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
+#[pyo3(signature = (high, low, close, volume))]
+pub fn ad(high: PySeries, low: PySeries, close: PySeries, volume: PySeries) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
     let v: Series = volume.into();
-    
-    let c_name = c.name().clone();
-    
+    let result = calculate_ad(&h, &l, &c, &v)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("AD 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 累积/派发摆动指标 (ADOSC)
+pub fn calculate_adosc(high: &Series, low: &Series, close: &Series, volume: &Series, fast_period: usize, slow_period: usize) -> PolarsResult<Series> {
     // 将 volume 转换为 f64 类型
-    let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+    let v_f64 = if volume.dtype() == &DataType::Int64 {
+        volume.cast(&DataType::Float64)?
     } else {
-        v
+        volume.clone()
     };
     
-    let high_vals = h.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("high must be numeric: {}", e)))?;
-    let low_vals = l.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("low must be numeric: {}", e)))?;
-    let close_vals = c.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
-    let volume_vals = v_f64.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
+    let volume_vals = v_f64.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![None; len];
@@ -3695,42 +3906,43 @@ pub fn adosc(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, f
         }
     }
     
-    Ok(PySeries(Series::new(c_name, result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 能量潮指标 (OBV) - 零拷贝优化版本
 #[pyfunction]
-#[pyo3(signature = (close, volume))]
-pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
+#[pyo3(signature = (high, low, close, volume, fast_period=3, slow_period=10))]
+pub fn adosc(high: PySeries, low: PySeries, close: PySeries, volume: PySeries, fast_period: usize, slow_period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
     let c: Series = close.into();
     let v: Series = volume.into();
-    
-    // 将 volume 转换为 f64 类型
-    let v_f64 = if v.dtype() == &DataType::Int64 {
-        v.cast(&DataType::Float64)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to cast volume to Float64: {}", e)))?
+    let result = calculate_adosc(&h, &l, &c, &v, fast_period, slow_period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ADOSC 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 能量潮指标 (OBV)
+pub fn calculate_obv(close: &Series, volume: &Series) -> PolarsResult<Series> {
+    let v_f64 = if volume.dtype() == &DataType::Int64 {
+        volume.cast(&DataType::Float64)?
     } else {
-        v
+        volume.clone()
     };
     
-    let close_vals = c.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("close must be numeric: {}", e)))?;
-    let volume_vals = v_f64.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("volume must be numeric: {}", e)))?;
+    let close_vals = close.f64()?;
+    let volume_vals = v_f64.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     
     if len == 0 {
-        return Ok(PySeries(Series::new(c.name().clone(), result)));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
-    // 零拷贝访问 + 无分支优化
     if let (Ok(c_arr), Ok(v_arr)) = (close_vals.cont_slice(), volume_vals.cont_slice()) {
         result[0] = v_arr[0];
         let mut obv = result[0];
         
-        // 使用符号函数
         for i in 1..len {
             let diff = c_arr[i] - c_arr[i - 1];
             // signum: 1.0 if diff > 0, -1.0 if diff < 0, 0.0 if diff == 0
@@ -3754,31 +3966,42 @@ pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
         }
     }
     
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (close, volume))]
+pub fn obv(close: PySeries, volume: PySeries) -> PyResult<PySeries> {
+    let c: Series = close.into();
+    let v: Series = volume.into();
+    let result = calculate_obv(&c, &v)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("OBV 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 // ============================================================================
 // 波动性指标 (Volatility Indicators)
 // ============================================================================
 
-/// 真实波幅 (TRANGE) - SIMD优化版本
-#[pyfunction]
-#[pyo3(signature = (high, low, close))]
-pub fn trange(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+/// 真实波幅 (TRANGE) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `close`: 收盘价 Series
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_trange(high: &Series, low: &Series, close: &Series) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = close_vals.len();
     let mut result = vec![f64::NAN; len];
     
     if len == 0 {
-        let result_series = Series::new(c.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 连续内存访问
@@ -3826,33 +4049,45 @@ pub fn trange(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeri
         }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+/// 真实波幅 (TRANGE) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (high, low, close))]
+pub fn trange(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_trange(&h, &l, &c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("TRANGE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 // ====================================================================
 // 波动率指标 (Volatility Indicators) - 价格波动测量
 // ====================================================================
 
-/// 平均真实波幅 (ATR) - SIMD优化版本
-#[pyfunction]
-#[pyo3(signature = (high, low, close, period=14))]
-pub fn atr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    // 连续内存访问
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+/// 平均真实波幅 (ATR) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `close`: 收盘价 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_atr(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = high_vals.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period >= len {
-        let result_series = Series::new(c.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 尝试零拷贝路径
@@ -3889,32 +4124,67 @@ pub fn atr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyR
         let high_vals_vec: Vec<f64> = high_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         let low_vals_vec: Vec<f64> = low_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
         let close_vals_vec: Vec<f64> = close_vals.into_iter().map(|x| x.unwrap_or(0.0)).collect();
-        result = calculate_atr(&high_vals_vec, &low_vals_vec, &close_vals_vec, period);
+        
+        // 使用原有的 calculate_atr 辅助函数
+        let first_tr = high_vals_vec[0] - low_vals_vec[0];
+        let mut tr_sum = first_tr;
+        
+        for i in 1..period {
+            let tr1 = high_vals_vec[i] - low_vals_vec[i];
+            let tr2 = (high_vals_vec[i] - close_vals_vec[i - 1]).abs();
+            let tr3 = (low_vals_vec[i] - close_vals_vec[i - 1]).abs();
+            tr_sum += tr1.max(tr2).max(tr3);
+        }
+        
+        result[period - 1] = tr_sum / period as f64;
+        
+        let smoothing_factor = 1.0 / period as f64;
+        let retention_factor = (period - 1) as f64 / period as f64;
+        
+        for i in period..len {
+            let tr1 = high_vals_vec[i] - low_vals_vec[i];
+            let tr2 = (high_vals_vec[i] - close_vals_vec[i - 1]).abs();
+            let tr3 = (low_vals_vec[i] - close_vals_vec[i - 1]).abs();
+            let tr = tr1.max(tr2).max(tr3);
+            result[i] = result[i - 1] * retention_factor + tr * smoothing_factor;
+        }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 标准化平均真实波幅 (NATR)
+/// 平均真实波幅 (ATR) - Python 导出函数
 #[pyfunction]
 #[pyo3(signature = (high, low, close, period=14))]
-pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+pub fn atr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    // 直接计算ATR和NATR
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+    let result = calculate_atr(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("ATR 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 标准化平均真实波幅 (NATR) - Rust 内部函数
+/// 
+/// # 参数
+/// - `high`: 最高价 Series
+/// - `low`: 最低价 Series
+/// - `close`: 收盘价 Series
+/// - `period`: 周期
+/// 
+/// # 返回
+/// 计算结果 Series
+pub fn calculate_natr(high: &Series, low: &Series, close: &Series, period: usize) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     
     let len = high_vals.len();
     let mut result = vec![f64::NAN; len];
     
     if period == 0 || period >= len {
-        let result_series = Series::new(c.name().clone(), result);
-        return Ok(PySeries(result_series));
+        return Ok(Series::new(close.name().clone(), result));
     }
     
     // 尝试零拷贝路径
@@ -3955,9 +4225,8 @@ pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
         }
     } else {
         // 后备路径: 先计算ATR,再计算NATR
-        let atr_result = atr(PySeries(h.clone()), PySeries(l.clone()), PySeries(c.clone()), period)?;
-        let atr_series: Series = atr_result.into();
-        let atr_vals = atr_series.f64().unwrap();
+        let atr_series = calculate_atr(high, low, close, period)?;
+        let atr_vals = atr_series.f64()?;
         
         for i in 0..len {
             if let (Some(atr_val), Some(close_val)) = (atr_vals.get(i), close_vals.get(i)) {
@@ -3968,29 +4237,31 @@ pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> Py
         }
     }
     
-    let result_series = Series::new(c.name().clone(), result);
-    Ok(PySeries(result_series))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+/// 标准化平均真实波幅 (NATR) - Python 导出函数
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period=14))]
+pub fn natr(high: PySeries, low: PySeries, close: PySeries, period: usize) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_natr(&h, &l, &c, period)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("NATR 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 // ============================================================================
 // 价格变换函数 (Price Transform Functions)
-// ====================================================================
-// 价格变换函数 (Price Transform) - 价格数据变换
-// ====================================================================
+// ============================================================================
 
-/// 平均价格 (AVGPRICE) - SIMD优化版本
-#[pyfunction]
-#[pyo3(signature = (open, high, low, close))]
-pub fn avgprice(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
-    let o: Series = open.into();
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let open_vals = o.f64().unwrap();
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+/// 平均价格 (AVGPRICE)
+pub fn calculate_avgprice(open: &Series, high: &Series, low: &Series, close: &Series) -> PolarsResult<Series> {
+    let open_vals = open.f64()?;
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     
@@ -4005,18 +4276,25 @@ pub fn avgprice(open: PySeries, high: PySeries, low: PySeries, close: PySeries) 
                         low_vals.get(i).unwrap_or(0.0) + close_vals.get(i).unwrap_or(0.0)) * 0.25;
         }
     }
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (open, high, low, close))]
+pub fn avgprice(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
+    let o: Series = open.into();
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_avgprice(&o, &h, &l, &c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("AVGPRICE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 中间价格 (MEDPRICE) - 简洁优化
-#[pyfunction]
-#[pyo3(signature = (high, low))]
-pub fn medprice(high: PySeries, low: PySeries) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
+pub fn calculate_medprice(high: &Series, low: &Series) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
     let len = high_vals.len();
     let mut result = vec![0.0; len];
     
@@ -4029,20 +4307,24 @@ pub fn medprice(high: PySeries, low: PySeries) -> PyResult<PySeries> {
             result[i] = (high_vals.get(i).unwrap_or(0.0) + low_vals.get(i).unwrap_or(0.0)) * 0.5;
         }
     }
-    Ok(PySeries(Series::new(h.name().clone(), result)))
+    Ok(Series::new(high.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low))]
+pub fn medprice(high: PySeries, low: PySeries) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let result = calculate_medprice(&h, &l)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("MEDPRICE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 /// 典型价格 (TYPPRICE) - 简洁优化
-#[pyfunction]
-#[pyo3(signature = (high, low, close))]
-pub fn typprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
-    let h: Series = high.into();
-    let l: Series = low.into();
-    let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+pub fn calculate_typprice(high: &Series, low: &Series, close: &Series) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     let one_third = 1.0 / 3.0;
@@ -4058,20 +4340,25 @@ pub fn typprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySe
                         close_vals.get(i).unwrap_or(0.0)) * one_third;
         }
     }
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
 }
 
-/// 加权收盘价 (WCLPRICE) - 简洁优化
 #[pyfunction]
 #[pyo3(signature = (high, low, close))]
-pub fn wclprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
+pub fn typprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
     let h: Series = high.into();
     let l: Series = low.into();
     let c: Series = close.into();
-    
-    let high_vals = h.f64().unwrap();
-    let low_vals = l.f64().unwrap();
-    let close_vals = c.f64().unwrap();
+    let result = calculate_typprice(&h, &l, &c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("TYPPRICE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
+}
+
+/// 加权收盘价 (WCLPRICE) - 简洁优化
+pub fn calculate_wclprice(high: &Series, low: &Series, close: &Series) -> PolarsResult<Series> {
+    let high_vals = high.f64()?;
+    let low_vals = low.f64()?;
+    let close_vals = close.f64()?;
     let len = close_vals.len();
     let mut result = vec![0.0; len];
     
@@ -4086,42 +4373,102 @@ pub fn wclprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySe
             result[i] = (high_vals.get(i).unwrap_or(0.0) + low_vals.get(i).unwrap_or(0.0) + c_val * 2.0) * 0.25;
         }
     }
-    Ok(PySeries(Series::new(c.name().clone(), result)))
+    Ok(Series::new(close.name().clone(), result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (high, low, close))]
+pub fn wclprice(high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
+    let h: Series = high.into();
+    let l: Series = low.into();
+    let c: Series = close.into();
+    let result = calculate_wclprice(&h, &l, &c)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("WCLPRICE 计算失败: {}", e)))?;
+    Ok(PySeries(result))
 }
 
 // ============================================================================
 // 周期指标 (Cycle Indicators) - 希尔伯特变换系列
-// ====================================================================
-// 周期指标 (Cycle Indicators) - 希尔伯特变换系列
-// ====================================================================
+// ============================================================================
 
 /// 希尔伯特变换 - 瞬时趋势线 (HT_TRENDLINE)
-#[pyfunction]
-#[pyo3(signature = (series))]
-pub fn ht_trendline(series: PySeries) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 
+/// 使用完整的希尔伯特变换算法提取价格的瞬时趋势
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// 瞬时趋势线
+pub fn calculate_ht_trendline(series: &Series) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let ht_trendline_values = {
         let mut result = vec![None; vec_values.len()];
         
-        // 简化的希尔伯特变换实现 - 使用数字滤波器方法
-        if vec_values.len() >= 7 {
-            for i in 6..vec_values.len() {
-                // 使用7点希尔伯特变换滤波器
-                let ht_value = (vec_values[i] + 2.0 * vec_values[i-2] + 3.0 * vec_values[i-4] + 3.0 * vec_values[i-6]) / 10.5;
-                result[i] = Some(ht_value);
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (trendline, _, _, _, _) = ht.update(vec_values[i]);
+                result[i] = Some(trendline);
             }
         }
         
         result
     };
     
-    let result = Series::new(s.name().clone(), ht_trendline_values);
+    Ok(Series::new(series.name().clone(), ht_trendline_values))
+}
+
+/// 希尔伯特变换 - 瞬时趋势线 (HT_TRENDLINE)
+#[pyfunction]
+#[pyo3(signature = (series))]
+pub fn ht_trendline(series: PySeries) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_ht_trendline(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_TRENDLINE 计算失败: {}", e)))?;
     Ok(PySeries(result))
+}
+
+/// 希尔伯特变换 - 主导周期 (HT_DCPERIOD)
+/// 
+/// 使用MESA自适应算法计算市场的主导周期
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// 主导周期值
+pub fn calculate_ht_dcperiod(series: &Series) -> PolarsResult<Series> {
+    let values = series.f64()?;
+    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
+    
+    let ht_dcperiod_values = {
+        let mut result = vec![None; vec_values.len()];
+        
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (_, period, _, _, _) = ht.update(vec_values[i]);
+                result[i] = Some(period);
+            }
+        }
+        
+        result
+    };
+    
+    Ok(Series::new(series.name().clone(), ht_dcperiod_values))
 }
 
 /// 希尔伯特变换 - 主导周期 (HT_DCPERIOD)
@@ -4129,79 +4476,36 @@ pub fn ht_trendline(series: PySeries) -> PyResult<PySeries> {
 #[pyo3(signature = (series))]
 pub fn ht_dcperiod(series: PySeries) -> PyResult<PySeries> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
-    let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
-    
-    let ht_dcperiod_values = {
-        let mut result = vec![None; vec_values.len()];
-        
-        // 简化的主导周期计算
-        if vec_values.len() >= 50 {
-            for i in 49..vec_values.len() {
-                // 分析最近50个数据点的周期性
-                let window = &vec_values[i-49..=i];
-                
-                // 简单的周期检测 - 寻找重复模式
-                let mut best_period = 15.0; // 默认周期
-                let mut max_correlation = 0.0;
-                
-                for period in 8..=48 {
-                    if i >= period * 2 {
-                        let mut correlation = 0.0;
-                        let mut count = 0;
-                        
-                        for j in 0..(window.len() - period) {
-                            correlation += (window[j] - window[j + period]).abs();
-                            count += 1;
-                        }
-                        
-                        if count > 0 {
-                            correlation = 1.0 / (1.0 + correlation / count as f64);
-                            if correlation > max_correlation {
-                                max_correlation = correlation;
-                                best_period = period as f64;
-                            }
-                        }
-                    }
-                }
-                
-                result[i] = Some(best_period);
-            }
-        }
-        
-        result
-    };
-    
-    let result = Series::new(s.name().clone(), ht_dcperiod_values);
+    let result = calculate_ht_dcperiod(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_DCPERIOD 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 希尔伯特变换 - 主导周期相位 (HT_DCPHASE)
-#[pyfunction]
-#[pyo3(signature = (series))]
-pub fn ht_dcphase(series: PySeries) -> PyResult<PySeries> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 
+/// 计算主导周期的相位角度（0-360度）
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// 相位角度（度）
+pub fn calculate_ht_dcphase(series: &Series) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let ht_dcphase_values = {
         let mut result = vec![None; vec_values.len()];
         
-        if vec_values.len() >= 10 {
-            for i in 9..vec_values.len() {
-                // 简化的相位计算 - 基于价格变化
-                let mut phase_sum = 0.0;
-                for j in 1..=5 {
-                    let change = vec_values[i - j + 1] - vec_values[i - j];
-                    phase_sum += change * (j as f64);
-                }
-                
-                // 将相位归一化到0-360度
-                let phase = (phase_sum.atan2(1.0) * 180.0 / std::f64::consts::PI + 360.0) % 360.0;
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (_, _, phase, _, _) = ht.update(vec_values[i]);
                 result[i] = Some(phase);
             }
         }
@@ -4209,32 +4513,45 @@ pub fn ht_dcphase(series: PySeries) -> PyResult<PySeries> {
         result
     };
     
-    let result = Series::new(s.name().clone(), ht_dcphase_values);
+    Ok(Series::new(series.name().clone(), ht_dcphase_values))
+}
+
+/// 希尔伯特变换 - 主导周期相位 (HT_DCPHASE)
+#[pyfunction]
+#[pyo3(signature = (series))]
+pub fn ht_dcphase(series: PySeries) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_ht_dcphase(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_DCPHASE 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
 /// 希尔伯特变换 - 相量组件 (HT_PHASOR)
-#[pyfunction]
-#[pyo3(signature = (series))]
-pub fn ht_phasor(series: PySeries) -> PyResult<(PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 
+/// 返回同相分量和正交分量
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// (同相分量, 正交分量)
+pub fn calculate_ht_phasor(series: &Series) -> PolarsResult<(Series, Series)> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let (inphase_values, quadrature_values) = {
         let mut inphase = vec![None; vec_values.len()];
         let mut quadrature = vec![None; vec_values.len()];
         
-        if vec_values.len() >= 7 {
-            for i in 6..vec_values.len() {
-                // 计算实部（同相分量）
-                let i_component = vec_values[i] - vec_values[i-6];
-                
-                // 计算虚部（正交分量）- 使用希尔伯特变换
-                let q_component = (vec_values[i-2] - vec_values[i-4]) * 0.5;
-                
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (_, _, _, i_component, q_component) = ht.update(vec_values[i]);
                 inphase[i] = Some(i_component);
                 quadrature[i] = Some(q_component);
             }
@@ -4243,39 +4560,58 @@ pub fn ht_phasor(series: PySeries) -> PyResult<(PySeries, PySeries)> {
         (inphase, quadrature)
     };
     
-    let base_name = s.name();
+    let base_name = series.name();
     let inphase_series = Series::new(PlSmallStr::from_str(&format!("{}_ht_inphase", base_name)), inphase_values);
     let quadrature_series = Series::new(PlSmallStr::from_str(&format!("{}_ht_quadrature", base_name)), quadrature_values);
     
-    Ok((PySeries(inphase_series), PySeries(quadrature_series)))
+    Ok((inphase_series, quadrature_series))
+}
+
+/// 希尔伯特变换 - 相量组件 (HT_PHASOR)
+#[pyfunction]
+#[pyo3(signature = (series))]
+pub fn ht_phasor(series: PySeries) -> PyResult<(PySeries, PySeries)> {
+    let s: Series = series.into();
+    let (inphase, quadrature) = calculate_ht_phasor(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_PHASOR 计算失败: {}", e)))?;
+    Ok((PySeries(inphase), PySeries(quadrature)))
 }
 
 /// 希尔伯特变换 - 正弦波 (HT_SINE)
-#[pyfunction]
-#[pyo3(signature = (series))]
-pub fn ht_sine(series: PySeries) -> PyResult<(PySeries, PySeries)> {
-    let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+/// 
+/// 从相量组件提取周期正弦波
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// (正弦波, 领先正弦波)
+pub fn calculate_ht_sine(series: &Series) -> PolarsResult<(Series, Series)> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let (sine_values, lead_sine_values) = {
         let mut sine = vec![None; vec_values.len()];
         let mut lead_sine = vec![None; vec_values.len()];
         
-        if vec_values.len() >= 10 {
-            for i in 9..vec_values.len() {
-                // 计算相位
-                let mut phase = 0.0;
-                for j in 1..=5 {
-                    phase += (vec_values[i - j + 1] - vec_values[i - j]) * (j as f64);
-                }
-                phase = phase / 15.0; // 归一化
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (_, _, _, i_component, q_component) = ht.update(vec_values[i]);
                 
-                // 计算正弦波
-                let sine_val = phase.sin();
-                let lead_sine_val = (phase + std::f64::consts::PI / 4.0).sin(); // 领先45度
+                let dc_phase = if i_component != 0.0 {
+                    (q_component / i_component).atan()
+                } else {
+                    0.0
+                };
+                
+                let sine_val = dc_phase.sin();
+                let lead_sine_val = (dc_phase + std::f64::consts::PI / 4.0).sin();
                 
                 sine[i] = Some(sine_val);
                 lead_sine[i] = Some(lead_sine_val);
@@ -4285,51 +4621,62 @@ pub fn ht_sine(series: PySeries) -> PyResult<(PySeries, PySeries)> {
         (sine, lead_sine)
     };
     
-    let base_name = s.name();
+    let base_name = series.name();
     let sine_series = Series::new(PlSmallStr::from_str(&format!("{}_ht_sine", base_name)), sine_values);
     let lead_sine_series = Series::new(PlSmallStr::from_str(&format!("{}_ht_leadsine", base_name)), lead_sine_values);
     
-    Ok((PySeries(sine_series), PySeries(lead_sine_series)))
+    Ok((sine_series, lead_sine_series))
 }
 
-/// 希尔伯特变换 - 趋势vs周期模式 (HT_TRENDMODE)
+/// 希尔伯特变换 - 正弦波 (HT_SINE)
 #[pyfunction]
 #[pyo3(signature = (series))]
-pub fn ht_trendmode(series: PySeries) -> PyResult<PySeries> {
+pub fn ht_sine(series: PySeries) -> PyResult<(PySeries, PySeries)> {
     let s: Series = series.into();
-    let values = s.f64()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Input must be numeric: {}", e)))?;
-    
+    let (sine, lead_sine) = calculate_ht_sine(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_SINE 计算失败: {}", e)))?;
+    Ok((PySeries(sine), PySeries(lead_sine)))
+}
+
+/// 希尔伯特变换 - 趋势模式判断 (HT_TRENDMODE)
+/// 
+/// 判断市场当前处于趋势模式还是周期模式
+/// 
+/// # 参数
+/// - `series`: 输入价格序列
+/// 
+/// # 返回
+/// 趋势模式（1=趋势，0=周期）
+pub fn calculate_ht_trendmode(series: &Series) -> PolarsResult<Series> {
+    let values = series.f64()?;
     let vec_values: Vec<f64> = values.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
     
     let ht_trendmode_values = {
         let mut result = vec![None; vec_values.len()];
         
-        if vec_values.len() >= 20 {
-            for i in 19..vec_values.len() {
-                // 分析趋势强度 vs 周期性
-                let window = &vec_values[i-19..=i];
+        if vec_values.len() >= 63 {
+            let mut ht = HilbertTransform::new();
+            
+            for i in 0..63 {
+                ht.update(vec_values[i]);
+            }
+            
+            for i in 63..vec_values.len() {
+                let (_, _, _, i_component, q_component) = ht.update(vec_values[i]);
                 
-                // 计算线性趋势强度
-                let n = window.len() as f64;
-                let sum_x: f64 = (0..window.len()).map(|x| x as f64).sum();
-                let sum_y: f64 = window.iter().sum();
-                let sum_xy: f64 = window.iter().enumerate().map(|(x, &y)| x as f64 * y).sum();
-                let sum_x2: f64 = (0..window.len()).map(|x| (x as f64).powi(2)).sum();
+                let magnitude = (i_component * i_component + q_component * q_component).sqrt();
                 
-                let trend_strength = if n * sum_x2 - sum_x * sum_x != 0.0 {
-                    ((n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)).abs()
-                } else {
+                let start = if i >= 10 { i - 10 } else { 0 };
+                let recent_prices = &vec_values[start..=i];
+                let mean = recent_prices.iter().sum::<f64>() / recent_prices.len() as f64;
+                let variance = recent_prices.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / recent_prices.len() as f64;
+                let std_dev = variance.sqrt();
+                
+                let trend_mode = if magnitude < std_dev * 0.25 {
                     0.0
+                } else {
+                    1.0
                 };
-                
-                // 计算价格波动性（周期性指标）
-                let mean = sum_y / n;
-                let variance = window.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n;
-                let volatility = variance.sqrt();
-                
-                // 趋势模式：1表示趋势，0表示周期
-                let trend_mode = if trend_strength > volatility * 0.1 { 1.0 } else { 0.0 };
                 
                 result[i] = Some(trend_mode);
             }
@@ -4338,17 +4685,24 @@ pub fn ht_trendmode(series: PySeries) -> PyResult<PySeries> {
         result
     };
     
-    let result = Series::new(s.name().clone(), ht_trendmode_values);
+    Ok(Series::new(series.name().clone(), ht_trendmode_values))
+}
+
+/// 希尔伯特变换 - 趋势模式判断 (HT_TRENDMODE)
+#[pyfunction]
+#[pyo3(signature = (series))]
+pub fn ht_trendmode(series: PySeries) -> PyResult<PySeries> {
+    let s: Series = series.into();
+    let result = calculate_ht_trendmode(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("HT_TRENDMODE 计算失败: {}", e)))?;
     Ok(PySeries(result))
 }
 
-// ======================== 蜡烛图模式识别函数 ========================
+// ============================================================================
+// 蜡烛图模式识别 (Candlestick Pattern Recognition)
+// ============================================================================
 
-// ====================================================================
-// 蜡烛图模式识别 (Candlestick Pattern Recognition) - K线形态
-// ====================================================================
-
-// CDL2CROWS - 两只乌鸦 (零拷贝 + tight loop 优化)
+// CDL2CROWS - 两只乌鸦
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {

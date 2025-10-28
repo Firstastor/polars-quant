@@ -38,6 +38,9 @@ pub struct Backtest {
     min_commission: f64,                       // 最低佣金
     slippage: f64,                             // 滑点
     position_size: f64,                        // 仓位大小 (0.0-1.0)，1.0表示满仓
+    leverage: f64,                             // 杠杆倍数 (1.0表示不使用杠杆，>1.0表示使用杠杆)
+    margin_call_threshold: f64,                // 保证金维持率阈值（低于此值触发强制平仓）
+    interest_rate: f64,                        // 融资年化利率（使用杠杆时的借款成本）
     benchmark: Option<DataFrame>,              // 基准指数数据（两列：日期和价格，所有股票共享）
     daily_records: Option<DataFrame>,          // 每日资金记录
     position_records: Option<DataFrame>,       // 持仓记录
@@ -48,7 +51,7 @@ pub struct Backtest {
 #[pymethods]
 impl Backtest {
     #[new]
-    #[pyo3(signature = (prices, buy_signals, sell_signals, initial_capital=100000.0, commission_rate=0.0003, min_commission=5.0, slippage=0.0, position_size=1.0, benchmark=None))]
+    #[pyo3(signature = (prices, buy_signals, sell_signals, initial_capital=100000.0, commission_rate=0.0003, min_commission=5.0, slippage=0.0, position_size=1.0, leverage=1.0, margin_call_threshold=0.3, interest_rate=0.06, benchmark=None))]
     pub fn new(
         prices: PyDataFrame,
         buy_signals: PyDataFrame,
@@ -58,6 +61,9 @@ impl Backtest {
         min_commission: f64,
         slippage: f64,
         position_size: f64,
+        leverage: f64,
+        margin_call_threshold: f64,
+        interest_rate: f64,
         benchmark: Option<PyDataFrame>,
     ) -> PyResult<Self> {
         let prices_df: DataFrame = prices.into();
@@ -80,6 +86,27 @@ impl Backtest {
         if position_size <= 0.0 || position_size > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "仓位大小必须在 (0.0, 1.0] 范围内"
+            ));
+        }
+        
+        // 验证杠杆倍数
+        if leverage < 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "杠杆倍数必须 >= 1.0（1.0表示不使用杠杆）"
+            ));
+        }
+        
+        // 验证保证金维持率
+        if margin_call_threshold < 0.0 || margin_call_threshold >= 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "保证金维持率阈值必须在 [0.0, 1.0) 范围内"
+            ));
+        }
+        
+        // 验证利率
+        if interest_rate < 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "年化利率必须 >= 0.0"
             ));
         }
         
@@ -106,6 +133,9 @@ impl Backtest {
             min_commission,
             slippage,
             position_size,
+            leverage,
+            margin_call_threshold,
+            interest_rate,
             benchmark: benchmark_df,
             daily_records: None,
             position_records: None,
@@ -591,6 +621,9 @@ impl Backtest {
                                 self.min_commission,
                                 self.slippage,
                                 self.position_size,
+                                self.leverage,
+                                self.margin_call_threshold,
+                                self.interest_rate,
                             ))
                         })
                         .collect()
@@ -633,6 +666,9 @@ impl Backtest {
                         self.min_commission,
                         self.slippage,
                         self.position_size,
+                        self.leverage,
+                        self.margin_call_threshold,
+                        self.interest_rate,
                     ))
                 })
                 .collect()
@@ -1374,16 +1410,25 @@ impl Backtest {
         min_commission: f64,
         slippage: f64,
         position_size: f64,
+        leverage: f64,
+        margin_call_threshold: f64,
+        interest_rate: f64,
     ) -> StockBacktestResult {
         let n_days = dates.len();
         let mut cash = initial_capital;
         let mut position: Option<Position> = None;
         let mut closed_positions: Vec<Position> = Vec::new();
+        let mut borrowed_amount = 0.0; // 融资借款金额
+        let mut accumulated_interest = 0.0; // 累计利息
         
         let mut daily_dates: Vec<String> = Vec::with_capacity(n_days);
         let mut daily_cash: Vec<f64> = Vec::with_capacity(n_days);
         let mut daily_stock_value: Vec<f64> = Vec::with_capacity(n_days);
         let mut daily_total_value: Vec<f64> = Vec::with_capacity(n_days);
+        
+        // 计算每日利息（年化利率转为日利率）
+        let daily_interest_rate = interest_rate / 365.0;
+        let using_leverage = leverage > 1.0;
         
         for day_idx in 0..n_days {
             let current_date = &dates[day_idx];
@@ -1430,27 +1475,43 @@ impl Backtest {
                 // 应用滑点：买入价格上浮
                 let buy_price = price * (1.0 + slippage);
                 
-                // 计算可以买入的整百股数量（使用指定仓位比例的资金）
-                let available_cash = cash * position_size;
+                // 计算可用购买力（考虑杠杆）
+                let buying_power = if using_leverage {
+                    cash * position_size * leverage
+                } else {
+                    cash * position_size
+                };
                 
                 // 先估算可买数量（考虑佣金）
-                let estimated_quantity = available_cash / (buy_price * (1.0 + commission_rate));
+                let estimated_quantity = buying_power / (buy_price * (1.0 + commission_rate));
                 let lots = (estimated_quantity / 100.0).floor() as i32; // 整百手数
                 
                 if lots > 0 {
                     let quantity = (lots * 100) as f64;
                     let buy_value = quantity * buy_price;
-                    let commission = (buy_value * commission_rate).max(min_commission); // 应用最低佣金
+                    let commission = (buy_value * commission_rate).max(min_commission);
                     let total_cost = buy_value + commission;
                     
-                    // 确保资金充足
-                    if total_cost <= cash {
-                        cash -= total_cost;
+                    // 计算实际需要的自有资金和借款
+                    let own_capital = if using_leverage {
+                        total_cost / leverage
+                    } else {
+                        total_cost
+                    };
+                    
+                    // 确保自有资金充足
+                    if own_capital <= cash {
+                        cash -= own_capital;
+                        
+                        // 如果使用杠杆，计算借款金额
+                        if using_leverage {
+                            borrowed_amount = total_cost - own_capital;
+                        }
                         
                         position = Some(Position {
                             symbol: symbol.clone(),
                             entry_date: current_date.clone(),
-                            entry_price: buy_price, // 使用滑点后的价格
+                            entry_price: buy_price,
                             quantity,
                             exit_date: None,
                             exit_price: None,
@@ -1462,9 +1523,96 @@ impl Backtest {
                 }
             }
             
-            // 计算当日持仓市值（优化：使用 map_or 避免分支）
+            // 处理卖出信号（必须在爆仓检查之前）
+            if sell_signal && position.is_some() {
+                let mut pos = position.take().unwrap();
+                
+                // 应用滑点：卖出价格下降
+                let sell_price = price * (1.0 - slippage);
+                let sell_value = pos.quantity * sell_price;
+                let sell_commission = (sell_value * commission_rate).max(min_commission);
+                
+                // 计算盈亏
+                let entry_value = pos.quantity * pos.entry_price;
+                let buy_commission = (entry_value * commission_rate).max(min_commission);
+                
+                let pnl: f64;
+                let actual_capital: f64;
+                
+                if using_leverage {
+                    // 归还借款和利息
+                    cash += sell_value - sell_commission - borrowed_amount - accumulated_interest;
+                    pnl = sell_value - entry_value - buy_commission - sell_commission - accumulated_interest;
+                    actual_capital = entry_value / leverage; // 实际投入的自有资金
+                    borrowed_amount = 0.0;
+                    accumulated_interest = 0.0;
+                } else {
+                    cash += sell_value - sell_commission;
+                    pnl = sell_value - entry_value - buy_commission - sell_commission;
+                    actual_capital = entry_value;
+                }
+                
+                pos.exit_date = Some(current_date.clone());
+                pos.exit_price = Some(sell_price);
+                pos.pnl = Some(pnl);
+                pos.pnl_pct = Some(pnl / actual_capital * 100.0);
+                pos.holding_days = Self::calculate_holding_days(&pos.entry_date, current_date);
+                
+                closed_positions.push(pos);
+            }
+            
+            // 杠杆相关逻辑（仅在使用杠杆时执行）
+            if using_leverage && position.is_some() {
+                // 每日计算利息
+                if borrowed_amount > 0.0 {
+                    let daily_interest = borrowed_amount * daily_interest_rate;
+                    accumulated_interest += daily_interest;
+                    cash -= daily_interest;
+                }
+                
+                // 检查保证金维持率（爆仓检测）
+                let stock_value = position.as_ref().unwrap().quantity * price;
+                let net_value = cash + stock_value - borrowed_amount - accumulated_interest;
+                let margin_ratio = net_value / (stock_value + cash);
+                
+                // 触发强制平仓（爆仓）
+                if margin_ratio < margin_call_threshold {
+                    let mut pos = position.take().unwrap();
+                    
+                    // 强制平仓价格（应用滑点）
+                    let liquidation_price = price * (1.0 - slippage);
+                    let sell_value = pos.quantity * liquidation_price;
+                    let sell_commission = (sell_value * commission_rate).max(min_commission);
+                    
+                    // 归还借款和利息
+                    cash += sell_value - sell_commission - borrowed_amount - accumulated_interest;
+                    
+                    // 记录平仓
+                    let entry_value = pos.quantity * pos.entry_price;
+                    let buy_commission = (entry_value * commission_rate).max(min_commission);
+                    let pnl = sell_value - entry_value - buy_commission - sell_commission - accumulated_interest;
+                    
+                    pos.exit_date = Some(current_date.clone());
+                    pos.exit_price = Some(liquidation_price);
+                    pos.pnl = Some(pnl);
+                    pos.pnl_pct = Some(pnl / (entry_value / leverage) * 100.0);
+                    pos.holding_days = Self::calculate_holding_days(&pos.entry_date, current_date);
+                    
+                    closed_positions.push(pos);
+                    
+                    // 重置借款和利息
+                    borrowed_amount = 0.0;
+                    accumulated_interest = 0.0;
+                }
+            }
+            
+            // 计算当日持仓市值和总资产
             let stock_value = position.as_ref().map_or(0.0, |pos| pos.quantity * price);
-            let total_value = cash + stock_value;
+            let total_value = if using_leverage {
+                cash + stock_value - borrowed_amount - accumulated_interest
+            } else {
+                cash + stock_value
+            };
             
             daily_dates.push(current_date.clone());
             daily_cash.push(cash);
@@ -1484,22 +1632,33 @@ impl Backtest {
                 let sell_value = pos.quantity * sell_price;
                 let sell_commission = (sell_value * commission_rate).max(min_commission);
                 
-                cash += sell_value - sell_commission;
-                
-                // 预先计算买入成本，避免重复计算
+                // 计算盈亏
                 let entry_value = pos.quantity * pos.entry_price;
                 let buy_commission = (entry_value * commission_rate).max(min_commission);
-                let pnl = sell_value - entry_value - buy_commission - sell_commission;
+                
+                let pnl: f64;
+                let actual_capital: f64;
+                
+                if using_leverage {
+                    // 归还借款和利息
+                    cash += sell_value - sell_commission - borrowed_amount - accumulated_interest;
+                    pnl = sell_value - entry_value - buy_commission - sell_commission - accumulated_interest;
+                    actual_capital = entry_value / leverage;
+                } else {
+                    cash += sell_value - sell_commission;
+                    pnl = sell_value - entry_value - buy_commission - sell_commission;
+                    actual_capital = entry_value;
+                }
                 
                 pos.exit_date = Some(last_date.clone());
                 pos.exit_price = Some(sell_price);
                 pos.pnl = Some(pnl);
-                pos.pnl_pct = Some(pnl / entry_value * 100.0); // 复用 entry_value
+                pos.pnl_pct = Some(pnl / actual_capital * 100.0);
                 pos.holding_days = Self::calculate_holding_days(&pos.entry_date, last_date);
                 
                 closed_positions.push(pos);
                 
-                // 更新最后一天的资金（优化：合并更新）
+                // 更新最后一天的资金
                 if let (Some(last_cash), Some(last_total)) = 
                     (daily_cash.last_mut(), daily_total_value.last_mut()) {
                     *last_cash = cash;

@@ -916,159 +916,47 @@ tr = trange(pl.col("high"), pl.col("low"), pl.col("close"))
 
 ## 🚀 快速开始
 
-### 示例 1：基础回测
-
 ```python
 import polars as pl
-from polars_quant import Backtest
+from polars_quant import Backtest, StockSelector, sma, rsi
 
-# 准备数据
-dates = pl.date_range(
-    start=pl.date(2023, 1, 1),
-    end=pl.date(2023, 12, 31),
-    interval="1d",
-    eager=True
-).cast(str)
+# 1. 股票筛选
+selector = StockSelector.from_folder("data/stocks")
+selected = selector.filter(
+    min_price=10.0,
+    max_price=100.0,
+    min_volume=1000000,
+    min_return_5d=0.02  # 5日涨幅 > 2%
+).sort(by="return_5d", ascending=False, top_n=10).result()
 
-n = len(dates)
+# 2. 计算技术指标
+df = pl.read_parquet("stock_data.parquet")
+df = df.with_columns([
+    sma(pl.col("close"), 20).alias("ma20"),
+    rsi(pl.col("close"), 14).alias("rsi")
+])
 
-# 价格数据
-prices_df = pl.DataFrame({
-    "date": dates,
-    "AAPL": [100 + i * 0.3 for i in range(n)],
-    "MSFT": [200 + i * 0.5 for i in range(n)],
-})
+# 3. 生成买卖信号
+buy_signals = df.select([
+    pl.col("date"),
+    ((pl.col("close") > pl.col("ma20")) & (pl.col("rsi") < 30)).alias("AAPL")
+])
 
-# 买卖信号（布尔值：True 表示买入/卖出，False 表示不操作）
-buy_signals_df = pl.DataFrame({
-    "date": dates,
-    "AAPL": [i in [10, 100, 200] for i in range(n)],  # 第10、100、200天买入
-    "MSFT": [i in [20, 120, 220] for i in range(n)],  # 第20、120、220天买入
-})
+sell_signals = df.select([
+    pl.col("date"),
+    ((pl.col("close") < pl.col("ma20")) | (pl.col("rsi") > 70)).alias("AAPL")
+])
 
-sell_signals_df = pl.DataFrame({
-    "date": dates,
-    "AAPL": [i in [60, 150, 280] for i in range(n)],  # 第60、150、280天卖出
-    "MSFT": [i in [70, 170, 300] for i in range(n)],  # 第70、170、300天卖出
-})
-
-# 创建并运行回测
+# 4. 回测
 bt = Backtest(
-    prices=prices_df,
-    buy_signals=buy_signals_df,
-    sell_signals=sell_signals_df,
-    initial_capital=100000.0,
-    commission_rate=0.0003,
-    min_commission=5.0,
-    slippage=0.001
+    prices=df.select(["date", "AAPL"]),
+    buy_signals=buy_signals,
+    sell_signals=sell_signals,
+    initial_capital=100000.0
 )
-
 bt.run()
-
-# 查看结果
-bt.summary()  # 综合统计
-daily = bt.get_daily_records()  # 每日记录
-positions = bt.get_position_records()  # 交易记录
+bt.summary()  # 查看详细统计
 ```
-
----
-
-### 示例 2：技术指标计算
-
-```python
-import polars as pl
-from polars_quant import sma, ema, rsi, macd, bband
-
-# 读取数据
-df = pl.read_csv("stock_data.csv")
-
-# 计算多个指标
-df = df.with_columns([
-    # 移动平均
-    sma(pl.col("close"), 5).alias("sma_5"),
-    sma(pl.col("close"), 20).alias("sma_20"),
-    ema(pl.col("close"), 12).alias("ema_12"),
-    
-    # RSI
-    rsi(pl.col("close"), 14).alias("rsi"),
-])
-
-# MACD
-macd_line, signal_line, hist = macd(pl.col("close"), 12, 26, 9)
-df = df.with_columns([
-    macd_line.alias("macd"),
-    signal_line.alias("signal"),
-    hist.alias("hist"),
-])
-
-# 布林带
-upper, middle, lower = bband(pl.col("close"), 20, 2.0)
-df = df.with_columns([
-    upper.alias("bb_upper"),
-    middle.alias("bb_middle"),
-    lower.alias("bb_lower"),
-])
-
-print(df)
-```
-
----
-
-### 示例 3：单股票深度分析
-
-```python
-# 运行回测后
-bt.run()
-
-# 查看单只股票
-stock_daily = bt.get_stock_daily("AAPL")
-stock_positions = bt.get_stock_positions("AAPL")
-print(bt.get_stock_summary("AAPL"))
-
-# 时间段筛选
-q1_data = bt.get_stock_daily("AAPL").filter(
-    (pl.col("date") >= "2023-01-01") & (pl.col("date") <= "2023-03-31")
-)
-
-# 找出最佳/最差交易
-all_positions = bt.get_position_records()
-best_trade = all_positions.filter(pl.col("symbol") == "AAPL").sort("pnl", descending=True).head(1)
-worst_trade = all_positions.filter(pl.col("symbol") == "AAPL").sort("pnl").head(1)
-```
-
----
-
-## 🎯 回测特性说明
-
-### 独立资金池
-每只股票使用独立的初始资金池，互不影响。适合测试多策略或对比不同股票表现。
-
-### 智能并行
-- **< 4 只股票**：串行执行（避免线程开销）
-- **≥ 4 只股票**：并行执行，线程数 = min(股票数, CPU核心数)
-
-### 交易规则
-- **整百股交易**：自动计算可买入的 100 股倍数
-- **佣金计算**：`max(交易金额 × 费率, 最低佣金)`
-- **滑点模拟**：买入价上浮，卖出价下调
-
-### 强制平仓
-回测结束时自动平仓所有持仓，按最后一日收盘价计算。
-
----
-
-## 📊 统计指标说明
-
-`summary()` 提供的详细统计包括：
-
-- **夏普比率** (Sharpe Ratio)：风险调整后收益
-- **索提诺比率** (Sortino Ratio)：只考虑下行风险的收益率
-- **卡尔马比率** (Calmar Ratio)：年化收益率 / 最大回撤
-- **最大回撤** (Max Drawdown)：资金曲线最大跌幅
-- **胜率** (Win Rate)：盈利交易占比
-- **盈亏比** (Profit Factor)：总盈利 / 总亏损
-- **持仓统计**：平均/最长/最短持仓天数
-- **连续统计**：最大连续盈利/亏损次数
 
 ---
 

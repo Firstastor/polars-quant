@@ -6,13 +6,13 @@ use std::fs::{self, File};
 use std::path::Path;
 
 #[pyclass]
-pub struct StockSelector {
+pub struct Selector {
     ohlcv_data: DataFrame,
     selected_symbols: Option<Vec<String>>,
 }
 
 #[pymethods]
-impl StockSelector {
+impl Selector {
     #[new]
     pub fn new(ohlcv_data: PyDataFrame) -> PyResult<Self> {
         let df: DataFrame = ohlcv_data.into();
@@ -23,7 +23,7 @@ impl StockSelector {
             ));
         }
         
-        Ok(StockSelector {
+        Ok(Selector {
             ohlcv_data: df,
             selected_symbols: None,
         })
@@ -298,7 +298,7 @@ impl StockSelector {
             PyErr::new::<pyo3::exceptions::PyValueError, _>("加载文件失败")
         })?;
         
-        Ok(StockSelector {
+        Ok(Selector {
             ohlcv_data: df,
             selected_symbols: None,
         })
@@ -457,7 +457,7 @@ impl StockSelector {
     }
 }
 
-impl StockSelector {
+impl Selector {
     fn filter_by_price(
         &self,
         symbols: &[String],
