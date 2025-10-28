@@ -4721,7 +4721,7 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         let series_result = Series::new(o.name().clone(), result);
@@ -4762,7 +4762,7 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             let lower_close = c2 < c1;
             
             result[i] = if day1_bullish && is_long_body1 && day2_bearish && gap_up && close_in_body1 &&
-                           day3_bearish && gap_up2 && lower_close { -100 } else { 0 };
+                           day3_bearish && gap_up2 && lower_close { true } else { false };
         }
     } else {
         // Fallback: 非连续内存
@@ -4789,7 +4789,7 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             let lower_close = c2 < c1;
             
             result[i] = if day1_bullish && is_long_body1 && day2_bearish && gap_up && close_in_body1 &&
-                           day3_bearish && gap_up2 && lower_close { -100 } else { 0 };
+                           day3_bearish && gap_up2 && lower_close { true } else { false };
         }
     }
     
@@ -4797,7 +4797,7 @@ pub fn cdl2crows(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDL3BLACKCROWS - 三只黑乌鸦 (零拷贝 + tight loop 优化)
+// CDL3BLACKCROWS - 三只黑乌鸦
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4812,7 +4812,7 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         let series_result = Series::new(o.name().clone(), result);
@@ -4847,7 +4847,7 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
             result[i] = if day1_bearish && day2_bearish && day3_bearish &&
                            long_body1 && long_body2 && long_body3 &&
                            decreasing_opens && decreasing_closes &&
-                           open_in_body1 && open_in_body2 { -100 } else { 0 };
+                           open_in_body1 && open_in_body2 { true } else { false };
         }
     } else {
         for i in 2..len {
@@ -4878,7 +4878,7 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
             result[i] = if day1_bearish && day2_bearish && day3_bearish &&
                            long_body1 && long_body2 && long_body3 &&
                            decreasing_opens && decreasing_closes &&
-                           open_in_body1 && open_in_body2 { -100 } else { 0 };
+                           open_in_body1 && open_in_body2 { true } else { false };
         }
     }
     
@@ -4886,7 +4886,7 @@ pub fn cdl3blackcrows(open: PySeries, high: PySeries, low: PySeries, close: PySe
     Ok(PySeries(series_result))
 }
 
-// CDL3WHITESOLDIERS - 三个白兵 (零拷贝 + tight loop 优化)
+// CDL3WHITESOLDIERS - 三个白兵
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -4901,7 +4901,7 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         let series_result = Series::new(o.name().clone(), result);
@@ -4941,7 +4941,7 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
             result[i] = if day1_bullish && day2_bullish && day3_bullish &&
                            long_body1 && long_body2 && long_body3 &&
                            increasing_opens && increasing_closes &&
-                           open_in_body1 && open_in_body2 && short_shadows { 100 } else { 0 };
+                           open_in_body1 && open_in_body2 && short_shadows { true } else { false };
         }
     } else {
         for i in 2..len {
@@ -4977,7 +4977,7 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
             result[i] = if day1_bullish && day2_bullish && day3_bullish &&
                            long_body1 && long_body2 && long_body3 &&
                            increasing_opens && increasing_closes &&
-                           open_in_body1 && open_in_body2 && short_shadows { 100 } else { 0 };
+                           open_in_body1 && open_in_body2 && short_shadows { true } else { false };
         }
     }
     
@@ -4985,7 +4985,7 @@ pub fn cdl3whitesoldiers(open: PySeries, high: PySeries, low: PySeries, close: P
     Ok(PySeries(series_result))
 }
 
-// CDLDOJI - 十字星 (零拷贝 + tight loop 优化)
+// CDLDOJI - 十字星
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5004,7 +5004,7 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];  // 直接使用 i32，不用 Option
+    let mut result = vec![false; len];  // 直接使用 i32，不用 Option
     
     // 连续内存访问
     if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
@@ -5030,7 +5030,7 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
             let is_doji = body < range * 0.1;
             let has_shadows = upper_shadow > body && lower_shadow > body;
             
-            result[i] = if is_doji && has_shadows { 100 } else { 0 };
+            result[i] = is_doji && has_shadows;
         }
     } else {
         // Fallback: 非连续内存路径
@@ -5048,7 +5048,7 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
             let is_doji = body < range * 0.1;
             let has_shadows = upper_shadow > body && lower_shadow > body;
             
-            result[i] = if is_doji && has_shadows { 100 } else { 0 };
+            result[i] = is_doji && has_shadows;
         }
     }
     
@@ -5056,7 +5056,7 @@ pub fn cdldoji(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -
     Ok(PySeries(series_result))
 }
 
-// CDLHAMMER - 锤子线 (零拷贝 + tight loop 优化)
+// CDLHAMMER - 锤子线
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5075,7 +5075,7 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     // 连续内存访问
     if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
@@ -5102,7 +5102,7 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             let short_upper_shadow = upper_shadow < body * 0.5;
             let long_lower_shadow = lower_shadow > body * 2.0;
             
-            result[i] = if small_body && short_upper_shadow && long_lower_shadow { 100 } else { 0 };
+            result[i] = small_body && short_upper_shadow && long_lower_shadow;
         }
     } else {
         // Fallback: 非连续内存
@@ -5121,7 +5121,7 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             let short_upper_shadow = upper_shadow < body * 0.5;
             let long_lower_shadow = lower_shadow > body * 2.0;
             
-            result[i] = if small_body && short_upper_shadow && long_lower_shadow { 100 } else { 0 };
+            result[i] = small_body && short_upper_shadow && long_lower_shadow;
         }
     }
     
@@ -5129,7 +5129,7 @@ pub fn cdlhammer(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDLHANGINGMAN - 上吊线 (零拷贝 + tight loop 优化)
+// CDLHANGINGMAN - 上吊线
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5144,7 +5144,7 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
         o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
@@ -5160,7 +5160,7 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
             let short_upper_shadow = upper_shadow < body_size * 0.5;
             let long_lower_shadow = lower_shadow > body_size * 2.0;
             
-            result[i] = if small_body && short_upper_shadow && long_lower_shadow { -100 } else { 0 };
+            result[i] = small_body && short_upper_shadow && long_lower_shadow;
         }
     } else {
         for i in 0..len {
@@ -5175,7 +5175,7 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
             let short_upper_shadow = upper_shadow < body_size * 0.5;
             let long_lower_shadow = lower_shadow > body_size * 2.0;
             
-            result[i] = if small_body && short_upper_shadow && long_lower_shadow { -100 } else { 0 };
+            result[i] = small_body && short_upper_shadow && long_lower_shadow;
         }
     }
     
@@ -5183,7 +5183,7 @@ pub fn cdlhangingman(open: PySeries, high: PySeries, low: PySeries, close: PySer
     Ok(PySeries(series_result))
 }
 
-// CDLSHOOTINGSTAR - 流星线 (零拷贝 + tight loop 优化)
+// CDLSHOOTINGSTAR - 流星线
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5198,7 +5198,7 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if let (Ok(o_slice), Ok(h_slice), Ok(l_slice), Ok(c_slice)) = (
         o_vals.cont_slice(), h_vals.cont_slice(), l_vals.cont_slice(), c_vals.cont_slice()
@@ -5214,7 +5214,7 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
             let long_upper_shadow = upper_shadow > body_size * 2.0;
             let short_lower_shadow = lower_shadow < body_size * 0.5;
             
-            result[i] = if small_body && long_upper_shadow && short_lower_shadow { -100 } else { 0 };
+            result[i] = small_body && long_upper_shadow && short_lower_shadow;
         }
     } else {
         for i in 0..len {
@@ -5229,7 +5229,7 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
             let long_upper_shadow = upper_shadow > body_size * 2.0;
             let short_lower_shadow = lower_shadow < body_size * 0.5;
             
-            result[i] = if small_body && long_upper_shadow && short_lower_shadow { -100 } else { 0 };
+            result[i] = small_body && long_upper_shadow && short_lower_shadow;
         }
     }
     
@@ -5237,7 +5237,7 @@ pub fn cdlshootingstar(open: PySeries, high: PySeries, low: PySeries, close: PyS
     Ok(PySeries(series_result))
 }
 
-// CDLENGULFING - 吞没模式 (零拷贝 + tight loop 优化)
+// CDLENGULFING - 吞没模式
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5252,7 +5252,7 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 2 {
         let series_result = Series::new(o.name().clone(), result);
@@ -5277,7 +5277,7 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
             let bearish_engulfing = day1_bullish && !day2_bullish &&
                                    o1 > c0 && c1 < o0 && body2 > body1;
             
-            result[i] = if bullish_engulfing { 100 } else if bearish_engulfing { -100 } else { 0 };
+            result[i] = bullish_engulfing || bearish_engulfing;
         }
     } else {
         for i in 1..len {
@@ -5295,7 +5295,7 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
             let bearish_engulfing = day1_bullish && !day2_bullish &&
                                    o1 > c0 && c1 < o0 && body2 > body1;
             
-            result[i] = if bullish_engulfing { 100 } else if bearish_engulfing { -100 } else { 0 };
+            result[i] = bullish_engulfing || bearish_engulfing;
         }
     }
     
@@ -5303,7 +5303,7 @@ pub fn cdlengulfing(open: PySeries, high: PySeries, low: PySeries, close: PySeri
     Ok(PySeries(series_result))
 }
 
-// CDLHARAMI - 孕育线 (零拷贝 + tight loop 优化)
+// CDLHARAMI - 孕育线
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5318,7 +5318,7 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 2 {
         let series_result = Series::new(o.name().clone(), result);
@@ -5343,8 +5343,8 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             
             result[i] = if long_body1 && small_body2 && inside_body {
                 let day1_bullish = c0 > o0; let day2_bullish = c1 > o1;
-                if !day1_bullish && day2_bullish { 100 } else if day1_bullish && !day2_bullish { -100 } else { 50 }
-            } else { 0 };
+                (!day1_bullish && day2_bullish) || (day1_bullish && !day2_bullish)
+            } else { false };
         }
     } else {
         for i in 1..len {
@@ -5364,8 +5364,8 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
             
             result[i] = if long_body1 && small_body2 && inside_body {
                 let day1_bullish = c0 > o0; let day2_bullish = c1 > o1;
-                if !day1_bullish && day2_bullish { 100 } else if day1_bullish && !day2_bullish { -100 } else { 50 }
-            } else { 0 };
+                (!day1_bullish && day2_bullish) || (day1_bullish && !day2_bullish)
+            } else { false };
         }
     }
     
@@ -5373,7 +5373,7 @@ pub fn cdlharami(open: PySeries, high: PySeries, low: PySeries, close: PySeries)
     Ok(PySeries(series_result))
 }
 
-// CDLMORNINGSTAR - 启明星 (零拷贝 + tight loop 优化)
+// CDLMORNINGSTAR - 启明星
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close, penetration=0.3))]
 pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries, penetration: f64) -> PyResult<PySeries> {
@@ -5388,7 +5388,7 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         let series_result = Series::new(o.name().clone(), result);
@@ -5414,7 +5414,7 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let day3_bullish = c2 > o2;
             let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
             
-            result[i] = if day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+            result[i] = day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates;
         }
     } else {
         for i in 2..len {
@@ -5434,7 +5434,7 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let day3_bullish = c2 > o2;
             let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
             
-            result[i] = if day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+            result[i] = day1_bearish && long_body1 && small_body2 && gap_down && day3_bullish && penetrates;
         }
     }
     
@@ -5442,7 +5442,7 @@ pub fn cdlmorningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     Ok(PySeries(series_result))
 }
 
-// CDLEVENINGSTAR - 黄昏星 (零拷贝 + tight loop 优化)
+// CDLEVENINGSTAR - 黄昏星
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close, penetration=0.3))]
 pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySeries, penetration: f64) -> PyResult<PySeries> {
@@ -5457,7 +5457,7 @@ pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         let series_result = Series::new(o.name().clone(), result);
@@ -5483,7 +5483,7 @@ pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let day3_bearish = c2 <= o2;
             let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
             
-            result[i] = if day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+            result[i] = day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates;
         }
     } else {
         for i in 2..len {
@@ -5503,7 +5503,7 @@ pub fn cdleveningstar(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let day3_bearish = c2 <= o2;
             let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
             
-            result[i] = if day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+            result[i] = day1_bullish && long_body1 && small_body2 && gap_up && day3_bearish && penetrates;
         }
     }
     
@@ -5526,7 +5526,7 @@ pub fn cdlpiercing(open: PySeries, high: PySeries, low: PySeries, close: PySerie
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 2 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5550,7 +5550,7 @@ pub fn cdlpiercing(open: PySeries, high: PySeries, low: PySeries, close: PySerie
             let closes_below_open = c1 < o0;
             
             result[i] = if day1_bearish && long_body1 && day2_bullish && opens_lower && 
-                           closes_above_midpoint && closes_below_open { 100 } else { 0 };
+                           closes_above_midpoint && closes_below_open { true } else { false };
         }
     } else {
         for i in 1..len {
@@ -5568,7 +5568,7 @@ pub fn cdlpiercing(open: PySeries, high: PySeries, low: PySeries, close: PySerie
             let closes_below_open = c1 < o0;
             
             result[i] = if day1_bearish && long_body1 && day2_bullish && opens_lower && 
-                           closes_above_midpoint && closes_below_open { 100 } else { 0 };
+                           closes_above_midpoint && closes_below_open { true } else { false };
         }
     }
     
@@ -5591,7 +5591,7 @@ pub fn cdldarkcloudcover(open: PySeries, high: PySeries, low: PySeries, close: P
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 2 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5615,7 +5615,7 @@ pub fn cdldarkcloudcover(open: PySeries, high: PySeries, low: PySeries, close: P
             let closes_above_close = c1 > c0 * (1.0 - penetration);
             
             result[i] = if day1_bullish && long_body1 && day2_bearish && opens_higher && 
-                           closes_below_midpoint && closes_above_close { -100 } else { 0 };
+                           closes_below_midpoint && closes_above_close { true } else { false };
         }
     } else {
         for i in 1..len {
@@ -5633,7 +5633,7 @@ pub fn cdldarkcloudcover(open: PySeries, high: PySeries, low: PySeries, close: P
             let closes_above_close = c1 > c0 * (1.0 - penetration);
             
             result[i] = if day1_bullish && long_body1 && day2_bearish && opens_higher && 
-                           closes_below_midpoint && closes_above_close { -100 } else { 0 };
+                           closes_below_midpoint && closes_above_close { true } else { false };
         }
     }
     
@@ -5656,7 +5656,7 @@ pub fn cdlharamicross(open: PySeries, high: PySeries, low: PySeries, close: PySe
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close must be numeric: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 2 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5679,9 +5679,7 @@ pub fn cdlharamicross(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
             let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
             
-            result[i] = if long_body1 && is_doji2 && inside_body {
-                if c0 <= o0 { 100 } else { -100 }
-            } else { 0 };
+            result[i] = long_body1 && is_doji2 && inside_body;
         }
     } else {
         for i in 1..len {
@@ -5700,9 +5698,7 @@ pub fn cdlharamicross(open: PySeries, high: PySeries, low: PySeries, close: PySe
             let curr_body_high = o1.max(c1); let curr_body_low = o1.min(c1);
             let inside_body = curr_body_high <= prev_body_high && curr_body_low >= prev_body_low;
             
-            result[i] = if long_body1 && is_doji2 && inside_body {
-                if c0 <= o0 { 100 } else { -100 }
-            } else { 0 };
+            result[i] = long_body1 && is_doji2 && inside_body;
         }
     }
     
@@ -5725,7 +5721,7 @@ pub fn cdlmorningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5750,7 +5746,7 @@ pub fn cdlmorningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
             let day3_bullish = c2 > o2;
             let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
             
-            result[i] = if day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+            result[i] = day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates;
         }
     } else {
         for i in 2..len {
@@ -5770,7 +5766,7 @@ pub fn cdlmorningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
             let day3_bullish = c2 > o2;
             let penetrates = c2 > (o0 + c0) / 2.0 * (1.0 + penetration);
             
-            result[i] = if day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates { 100 } else { 0 };
+            result[i] = day1_bearish && long_body1 && is_doji2 && gap_down && day3_bullish && penetrates;
         }
     }
     
@@ -5792,7 +5788,7 @@ pub fn cdleveningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5817,7 +5813,7 @@ pub fn cdleveningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
             let day3_bearish = c2 <= o2;
             let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
             
-            result[i] = if day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+            result[i] = day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates;
         }
     } else {
         for i in 2..len {
@@ -5837,7 +5833,7 @@ pub fn cdleveningdojistar(open: PySeries, high: PySeries, low: PySeries, close: 
             let day3_bearish = c2 <= o2;
             let penetrates = c2 < (o0 + c0) / 2.0 * (1.0 - penetration);
             
-            result[i] = if day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates { -100 } else { 0 };
+            result[i] = day1_bullish && long_body1 && is_doji2 && gap_up && day3_bearish && penetrates;
         }
     }
     
@@ -5859,7 +5855,7 @@ pub fn cdl3inside(open: PySeries, high: PySeries, low: PySeries, close: PySeries
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5885,11 +5881,8 @@ pub fn cdl3inside(open: PySeries, high: PySeries, low: PySeries, close: PySeries
             let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
             let day3_bullish = c2 > o2; let day3_bearish = c2 <= o2;
             
-            result[i] = if day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0 {
-                100
-            } else if !day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0 {
-                -100
-            } else { 0 };
+            result[i] = (day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0) ||
+                       (!day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0);
         }
     } else {
         for i in 2..len {
@@ -5911,18 +5904,15 @@ pub fn cdl3inside(open: PySeries, high: PySeries, low: PySeries, close: PySeries
             let day1_bearish = c0 <= o0; let day2_bullish = c1 > o1;
             let day3_bullish = c2 > o2; let day3_bearish = c2 <= o2;
             
-            result[i] = if day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0 {
-                100
-            } else if !day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0 {
-                -100
-            } else { 0 };
+            result[i] = (day1_bearish && day2_bullish && long_body1 && small_body2 && inside_body && day3_bullish && c2 > o0) ||
+                       (!day1_bearish && !day2_bullish && long_body1 && small_body2 && inside_body && day3_bearish && c2 < o0);
         }
     }
     
     Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3OUTSIDE - 三外部上升/下降 (零拷贝 + tight loop 优化)
+// CDL3OUTSIDE - 三外部上升/下降
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5937,7 +5927,7 @@ pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySerie
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -5959,9 +5949,8 @@ pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySerie
             
             let day3_bullish = c2 > o2;
             
-            result[i] = if bullish_engulfing && day3_bullish && c2 > c1 { 100 }
-                       else if bearish_engulfing && !day3_bullish && c2 < c1 { -100 }
-                       else { 0 };
+            result[i] = (bullish_engulfing && day3_bullish && c2 > c1) ||
+                       (bearish_engulfing && !day3_bullish && c2 < c1);
         }
     } else {
         for i in 2..len {
@@ -5977,16 +5966,15 @@ pub fn cdl3outside(open: PySeries, high: PySeries, low: PySeries, close: PySerie
             
             let day3_bullish = c2 > o2;
             
-            result[i] = if bullish_engulfing && day3_bullish && c2 > c1 { 100 }
-                       else if bearish_engulfing && !day3_bullish && c2 < c1 { -100 }
-                       else { 0 };
+            result[i] = (bullish_engulfing && day3_bullish && c2 > c1) ||
+                       (bearish_engulfing && !day3_bullish && c2 < c1);
         }
     }
     
     Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3LINESTRIKE - 三线攻击 (零拷贝 + tight loop 优化)
+// CDL3LINESTRIKE - 三线攻击
 #[pyfunction]
 #[pyo3(signature = (open, _high, _low, close))]
 pub fn cdl3linestrike(open: PySeries, _high: PySeries, _low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -5997,7 +5985,7 @@ pub fn cdl3linestrike(open: PySeries, _high: PySeries, _low: PySeries, close: Py
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 4 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -6017,9 +6005,8 @@ pub fn cdl3linestrike(open: PySeries, _high: PySeries, _low: PySeries, close: Py
             
             let day4_bullish = c3 > o3;
             
-            result[i] = if three_bears && day4_bullish && o3 < c2 && c3 > o0 { 100 }
-                       else if three_bulls && !day4_bullish && o3 > c2 && c3 < o0 { -100 }
-                       else { 0 };
+            result[i] = (three_bears && day4_bullish && o3 < c2 && c3 > o0) ||
+                       (three_bulls && !day4_bullish && o3 > c2 && c3 < o0);
         }
     } else {
         for i in 3..len {
@@ -6035,16 +6022,15 @@ pub fn cdl3linestrike(open: PySeries, _high: PySeries, _low: PySeries, close: Py
             
             let day4_bullish = c3 > o3;
             
-            result[i] = if three_bears && day4_bullish && o3 < c2 && c3 > o0 { 100 }
-                       else if three_bulls && !day4_bullish && o3 > c2 && c3 < o0 { -100 }
-                       else { 0 };
+            result[i] = (three_bears && day4_bullish && o3 < c2 && c3 > o0) ||
+                       (three_bulls && !day4_bullish && o3 > c2 && c3 < o0);
         }
     }
     
     Ok(PySeries(Series::new(o.name().clone(), result)))
 }
 
-// CDL3STARSINSOUTH - 三星在南 (零拷贝 + tight loop 优化)
+// CDL3STARSINSOUTH - 三星在南
 #[pyfunction]
 #[pyo3(signature = (open, high, low, close))]
 pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: PySeries) -> PyResult<PySeries> {
@@ -6059,7 +6045,7 @@ pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: Py
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -6091,7 +6077,7 @@ pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: Py
             
             result[i] = if day1_bearish && long_body1 && long_lower_shadow1 &&
                            small_body2 && opens_in_body1 && closes_above_low1 &&
-                           day3_bearish && small_body3 && contained_in_day2 { 100 } else { 0 };
+                           day3_bearish && small_body3 && contained_in_day2 { true } else { false };
         }
     } else {
         for i in 2..len {
@@ -6120,13 +6106,13 @@ pub fn cdl3starsinsouth(open: PySeries, high: PySeries, low: PySeries, close: Py
             
             result[i] = if day1_bearish && long_body1 && long_lower_shadow1 &&
                            small_body2 && opens_in_body1 && closes_above_low1 &&
-                           day3_bearish && small_body3 && contained_in_day2 { 100 } else { 0 };
+                           day3_bearish && small_body3 && contained_in_day2 { true } else { false };
         }
     }
     
     Ok(PySeries(Series::new(o.name().clone(), result)))
 }
-// CDLADVANCEBLOCK - 前进阻挡 (零拷贝 + tight loop 优化)
+// CDLADVANCEBLOCK - 前进阻挡
 #[pyfunction]
 pub fn cdladvanceblock(open: PySeries, high: PySeries, _low: PySeries, close: PySeries) -> PyResult<PySeries> {
     let o: Series = open.into();
@@ -6138,7 +6124,7 @@ pub fn cdladvanceblock(open: PySeries, high: PySeries, _low: PySeries, close: Py
     let c_vals = c.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Close: {}", e)))?;
     
     let len = o_vals.len();
-    let mut result = vec![0i32; len];
+    let mut result = vec![false; len];
     
     if len < 3 {
         return Ok(PySeries(Series::new(o.name().clone(), result)));
@@ -6159,7 +6145,7 @@ pub fn cdladvanceblock(open: PySeries, high: PySeries, _low: PySeries, close: Py
             let decreasing_bodies = body3 <= body2 && body2 <= body1;
             
             result[i] = if three_white_soldiers && ascending_closes && opens_within_bodies && 
-                           decreasing_highs && decreasing_bodies { -100 } else { 0 };
+                           decreasing_highs && decreasing_bodies { true } else { false };
         }
     } else {
         for i in 2..len {
@@ -6176,7 +6162,7 @@ pub fn cdladvanceblock(open: PySeries, high: PySeries, _low: PySeries, close: Py
             let decreasing_bodies = body3 <= body2 && body2 <= body1;
             
             result[i] = if three_white_soldiers && ascending_closes && opens_within_bodies && 
-                           decreasing_highs && decreasing_bodies { -100 } else { 0 };
+                           decreasing_highs && decreasing_bodies { true } else { false };
         }
     }
     

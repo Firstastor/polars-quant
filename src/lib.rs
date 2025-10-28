@@ -4,6 +4,7 @@ mod talib;
 mod backtest;
 mod selector;
 mod strategy;
+mod factor;
 
 #[pymodule]
 fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -21,6 +22,11 @@ fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 策略模块 (Trading Strategies)
     // ====================================================================
     m.add_class::<strategy::Strategy>()?;
+    
+    // ====================================================================
+    // 因子模块 (Factor Mining & Evaluation)
+    // ====================================================================
+    m.add_class::<factor::Factor>()?;
 
     
     // ====================================================================

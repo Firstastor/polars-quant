@@ -123,6 +123,9 @@ class Backtest:
         min_commission: float = 5.0,
         slippage: float = 0.0,
         position_size: float = 1.0,
+        leverage: float = 1.0,
+        margin_call_threshold: float = 0.3,
+        interest_rate: float = 0.06,
         benchmark: Optional[pl.DataFrame] = None
     ) -> None:
         """
@@ -141,6 +144,14 @@ class Backtest:
             slippage: 滑点，默认0.0（0.001表示0.1%）
             position_size: 仓位大小，默认1.0（满仓），取值范围(0.0, 1.0]
                 例如：0.5表示每次使用50%的可用资金买入
+            leverage: 杠杆倍数，默认1.0（不使用杠杆），取值范围[1.0, ∞)
+                例如：2.0表示使用2倍杠杆，可买入2倍本金的股票
+                注意：使用杠杆会产生融资利息成本
+            margin_call_threshold: 保证金维持率阈值，默认0.3（30%）
+                当保证金维持率低于此值时触发强制平仓
+                保证金维持率 = (总资产 - 负债) / 总资产
+            interest_rate: 融资年化利率，默认0.06（6%）
+                使用杠杆时的借款成本，每日计息
             benchmark: 基准指数数据DataFrame（可选），必须恰好有2列（日期和价格）
                 格式: {"date": [...], "benchmark": [...]}
                 所有股票将使用此基准进行对比分析
@@ -148,6 +159,29 @@ class Backtest:
         Raises:
             ValueError: 当DataFrame列数不一致或prices列数少于2时
             ValueError: 当仓位大小不在(0.0, 1.0]范围内时
+            ValueError: 当杠杆倍数 < 1.0时
+            ValueError: 当保证金维持率不在[0.0, 1.0)范围内时
+        
+        Examples:
+            基本回测（无杠杆）：
+            >>> bt = Backtest(
+            ...     prices=prices_df,
+            ...     buy_signals=buy_df,
+            ...     sell_signals=sell_df,
+            ...     initial_capital=100000.0
+            ... )
+            
+            使用2倍杠杆回测：
+            >>> bt = Backtest(
+            ...     prices=prices_df,
+            ...     buy_signals=buy_df,
+            ...     sell_signals=sell_df,
+            ...     initial_capital=100000.0,
+            ...     leverage=2.0,              # 2倍杠杆
+            ...     margin_call_threshold=0.3, # 保证金维持率30%以下强平
+            ...     interest_rate=0.06         # 年化6%融资利率
+            ... )
+
             ValueError: 当基准数据不是恰好2列时
             
         Examples:
@@ -433,7 +467,7 @@ class Backtest:
 # 股票选择器 (Stock Selector) - 链式筛选系统
 # ====================================================================
 
-class StockSelector:
+class Selector:
     """
     股票选择器 - 支持链式调用的股票筛选工具
     
@@ -449,7 +483,7 @@ class StockSelector:
         >>> import polars_quant as pq
         >>> 
         >>> # 从文件夹加载数据
-        >>> selector = pq.StockSelector.from_folder(
+        >>> selector = pq.Selector.from_folder(
         ...     "data/stocks",
         ...     file_type="parquet",  # 可选: parquet/csv/xlsx/xls/json/feather/ipc
         ...     prefix="SH",          # 可选: 只加载以 SH 开头的文件
@@ -512,7 +546,7 @@ class StockSelector:
         prefix: Optional[str] = None,
         suffix: Optional[str] = None,
         has_header: bool = True
-    ) -> 'StockSelector':
+    ) -> 'Selector':
         """
         从文件夹批量加载股票数据
         
@@ -525,7 +559,7 @@ class StockSelector:
             has_header: CSV/Excel 文件是否包含表头（默认 True）
         
         Returns:
-            StockSelector 实例
+            Selector 实例
         
         Raises:
             ValueError: 不是有效的目录
@@ -535,13 +569,13 @@ class StockSelector:
         
         Examples:
             >>> # 加载所有支持格式的文件
-            >>> selector = pq.StockSelector.from_folder("data/stocks")
+            >>> selector = pq.Selector.from_folder("data/stocks")
             >>> 
             >>> # 只加载 parquet 文件
-            >>> selector = pq.StockSelector.from_folder("data/stocks", file_type="parquet")
+            >>> selector = pq.Selector.from_folder("data/stocks", file_type="parquet")
             >>> 
             >>> # 只加载上海股票（SH 开头）
-            >>> selector = pq.StockSelector.from_folder("data/stocks", prefix="SH")
+            >>> selector = pq.Selector.from_folder("data/stocks", prefix="SH")
         """
         ...
     
@@ -600,7 +634,7 @@ class StockSelector:
         # 突破筛选
         breakout: Optional[str] = None,
         breakout_period: int = 20
-    ) -> 'StockSelector':
+    ) -> 'Selector':
         """
         筛选股票（支持链式调用）
         
@@ -694,7 +728,7 @@ class StockSelector:
         """
         ...
     
-    def reset(self) -> 'StockSelector':
+    def reset(self) -> 'Selector':
         """
         重置筛选条件
         
@@ -711,7 +745,7 @@ class StockSelector:
         by: str,
         ascending: bool = False,
         top_n: Optional[int] = None
-    ) -> 'StockSelector':
+    ) -> 'Selector':
         """
         对股票进行排序并可选择取 TopN
         
@@ -3355,3 +3389,1046 @@ def cdlunique3river(open: pl.Series, high: pl.Series, low: pl.Series, close: pl.
         >>> result = pq.cdlunique3river(open, high, low, close)
     """
     ...
+
+
+# ====================================================================
+# 交易策略 (Trading Strategy)
+# ====================================================================
+
+class Strategy:
+    """
+    交易策略模块
+    
+    提供多种常用交易策略，每个策略返回包含 buy_signal 和 sell_signal 列的 DataFrame
+    
+    主要策略:
+    - MA均线策略（支持多种均线类型、趋势过滤、斜率过滤）
+    - MACD策略（经典MACD金叉死叉）
+    - RSI策略（超买超卖区间）
+    - 布林带策略（突破上下轨）
+    - KDJ策略（随机指标）
+    - CCI策略（顺势指标）
+    - ADX策略（趋势强度）
+    - 突破策略（新高新低突破）
+    - 反转策略（均值回归）
+    - 成交量策略（放量突破）
+    - 网格策略（区间震荡）
+    - 跳空策略（缺口交易）
+    - 形态策略（K线形态识别）
+    - 趋势策略（多均线趋势判断）
+    
+    Examples:
+        >>> import polars as pl
+        >>> from polars_quant import Strategy
+        >>> 
+        >>> df = pl.DataFrame({
+        ...     "date": ["2024-01-01", "2024-01-02"],
+        ...     "open": [100.0, 102.0],
+        ...     "high": [105.0, 106.0],
+        ...     "low": [99.0, 101.0],
+        ...     "close": [103.0, 104.0],
+        ...     "volume": [1000000, 1200000]
+        ... })
+        >>> 
+        >>> strategy = Strategy()
+        >>> 
+        >>> # MA均线策略
+        >>> signals = strategy.ma(df, fast_period=10, slow_period=20)
+        >>> 
+        >>> # MACD策略
+        >>> signals = strategy.macd(df)
+        >>> 
+        >>> # 组合多个策略
+        >>> ma_signals = strategy.ma(df, fast_period=5, slow_period=10)
+        >>> rsi_signals = strategy.rsi(df, period=14, oversold=30, overbought=70)
+        >>> # 取交集（同时满足）
+        >>> combined = ma_signals.with_columns([
+        ...     (pl.col("buy_signal") & rsi_signals["buy_signal"]).alias("buy_signal"),
+        ...     (pl.col("sell_signal") | rsi_signals["sell_signal"]).alias("sell_signal")
+        ... ])
+    """
+    
+    def __init__(self) -> None:
+        """创建Strategy实例"""
+        ...
+    
+    def ma(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        fast_period: int = 10,
+        slow_period: int = 20,
+        ma_type: str = "sma",
+        trend_period: int = 0,
+        trend_filter: bool = False,
+        slope_filter: bool = False,
+        distance_pct: float = 0.0
+    ) -> pl.DataFrame:
+        """
+        MA均线策略（支持多种过滤条件）
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            fast_period: 快线周期（默认10）
+            slow_period: 慢线周期（默认20）
+            ma_type: 均线类型（默认"sma"），可选: "sma", "ema", "wma", "dema", "tema"
+            trend_period: 趋势过滤均线周期（默认0，不使用）
+            trend_filter: 是否启用趋势过滤（价格在趋势线上方才买入）
+            slope_filter: 是否启用斜率过滤（均线斜率向上才买入）
+            distance_pct: 价格与均线最小距离百分比过滤（默认0.0，不使用）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 快线上穿慢线时为True
+            - sell_signal: 快线下穿慢线时为True
+        
+        Examples:
+            >>> # 简单MA策略
+            >>> signals = strategy.ma(df, fast_period=5, slow_period=10)
+            >>> 
+            >>> # 带趋势过滤的MA策略
+            >>> signals = strategy.ma(df, fast_period=10, slow_period=20,
+            ...                       trend_period=60, trend_filter=True)
+            >>> 
+            >>> # EMA策略
+            >>> signals = strategy.ma(df, ma_type="ema", fast_period=12, slow_period=26)
+        """
+        ...
+    
+    def macd(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        fast_period: int = 12,
+        slow_period: int = 26,
+        signal_period: int = 9
+    ) -> pl.DataFrame:
+        """
+        MACD策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            fast_period: 快线周期（默认12）
+            slow_period: 慢线周期（默认26）
+            signal_period: 信号线周期（默认9）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: MACD金叉（MACD线上穿信号线）
+            - sell_signal: MACD死叉（MACD线下穿信号线）
+        """
+        ...
+    
+    def rsi(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 14,
+        oversold: float = 30.0,
+        overbought: float = 70.0
+    ) -> pl.DataFrame:
+        """
+        RSI策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: RSI周期（默认14）
+            oversold: 超卖阈值（默认30）
+            overbought: 超买阈值（默认70）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: RSI从超卖区向上突破时为True
+            - sell_signal: RSI从超买区向下突破时为True
+        """
+        ...
+    
+    def bband(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20,
+        std_dev: float = 2.0
+    ) -> pl.DataFrame:
+        """
+        布林带策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 周期（默认20）
+            std_dev: 标准差倍数（默认2.0）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 价格突破下轨后回归时为True
+            - sell_signal: 价格突破上轨后回落时为True
+        """
+        ...
+    
+    def stoch(
+        self,
+        df: pl.DataFrame,
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        fastk_period: int = 14,
+        slowk_period: int = 3,
+        slowd_period: int = 3,
+        oversold: float = 20.0,
+        overbought: float = 80.0
+    ) -> pl.DataFrame:
+        """
+        KDJ/Stochastic策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            fastk_period: FastK周期（默认14）
+            slowk_period: SlowK周期（默认3）
+            slowd_period: SlowD周期（默认3）
+            oversold: 超卖阈值（默认20）
+            overbought: 超买阈值（默认80）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: K线从超卖区向上突破D线
+            - sell_signal: K线从超买区向下突破D线
+        """
+        ...
+    
+    def cci(
+        self,
+        df: pl.DataFrame,
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        period: int = 20,
+        oversold: float = -100.0,
+        overbought: float = 100.0
+    ) -> pl.DataFrame:
+        """
+        CCI顺势指标策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            period: 周期（默认20）
+            oversold: 超卖阈值（默认-100）
+            overbought: 超买阈值（默认100）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+        """
+        ...
+    
+    def adx(
+        self,
+        df: pl.DataFrame,
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        period: int = 14,
+        threshold: float = 25.0
+    ) -> pl.DataFrame:
+        """
+        ADX趋势强度策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            period: 周期（默认14）
+            threshold: ADX阈值（默认25，ADX>25表示趋势明显）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: ADX>threshold且+DI>-DI
+            - sell_signal: ADX>threshold且-DI>+DI
+        """
+        ...
+    
+    def breakout(
+        self,
+        df: pl.DataFrame,
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        period: int = 20,
+        atr_multiplier: float = 2.0
+    ) -> pl.DataFrame:
+        """
+        突破策略（Donchian Channel + ATR过滤）
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            period: 通道周期（默认20）
+            atr_multiplier: ATR止损倍数（默认2.0）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 突破N日最高价
+            - sell_signal: 跌破N日最低价
+        """
+        ...
+    
+    def reversion(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20,
+        entry_std: float = 2.0,
+        exit_std: float = 0.5
+    ) -> pl.DataFrame:
+        """
+        均值回归策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 均值周期（默认20）
+            entry_std: 入场标准差倍数（默认2.0）
+            exit_std: 出场标准差倍数（默认0.5）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 价格低于均值-entry_std*std
+            - sell_signal: 价格回归至均值-exit_std*std以上
+        """
+        ...
+    
+    def volume(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        volume_col: str = "volume",
+        volume_period: int = 20,
+        volume_multiplier: float = 2.0,
+        price_period: int = 20
+    ) -> pl.DataFrame:
+        """
+        成交量突破策略
+        
+        Args:
+            df: 包含价格和成交量数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            volume_col: 成交量列名（默认"volume"）
+            volume_period: 成交量均值周期（默认20）
+            volume_multiplier: 成交量倍数（默认2.0）
+            price_period: 价格突破周期（默认20）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 放量突破N日最高价
+            - sell_signal: 放量跌破N日最低价
+        """
+        ...
+    
+    def grid(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        grid_size: float = 0.05,
+        base_price: Optional[float] = None
+    ) -> pl.DataFrame:
+        """
+        网格交易策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            grid_size: 网格间距（百分比，默认0.05=5%）
+            base_price: 基准价格（默认None，使用第一个价格）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 价格下跌至下一个网格线
+            - sell_signal: 价格上涨至上一个网格线
+        """
+        ...
+    
+    def gap(
+        self,
+        df: pl.DataFrame,
+        open_col: str = "open",
+        close_col: str = "close",
+        gap_threshold: float = 0.02
+    ) -> pl.DataFrame:
+        """
+        跳空缺口策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            open_col: 开盘价列名（默认"open"）
+            close_col: 收盘价列名（默认"close"）
+            gap_threshold: 跳空阈值（默认0.02=2%）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 向上跳空
+            - sell_signal: 向下跳空
+        """
+        ...
+    
+    def pattern(
+        self,
+        df: pl.DataFrame,
+        open_col: str = "open",
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        pattern_type: str = "hammer"
+    ) -> pl.DataFrame:
+        """
+        K线形态策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            open_col: 开盘价列名（默认"open"）
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            pattern_type: 形态类型（默认"hammer"），可选:
+                - "hammer": 锤子线
+                - "shooting_star": 流星线
+                - "engulfing": 吞没形态
+                - "doji": 十字星
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+        """
+        ...
+    
+    def trend(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        short_period: int = 5,
+        medium_period: int = 10,
+        long_period: int = 20
+    ) -> pl.DataFrame:
+        """
+        多均线趋势策略
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            short_period: 短期均线周期（默认5）
+            medium_period: 中期均线周期（默认10）
+            long_period: 长期均线周期（默认20）
+        
+        Returns:
+            包含 buy_signal 和 sell_signal 列的DataFrame
+            - buy_signal: 短期>中期>长期（多头排列）
+            - sell_signal: 短期<中期<长期（空头排列）
+        """
+        ...
+
+
+# ====================================================================
+# 因子挖掘和评估 (Factor Mining & Evaluation)
+# ====================================================================
+
+class Factor:
+    """
+    因子挖掘和评估模块
+    
+    提供因子计算、因子评估、IC分析等功能，用于量化选股和因子研究
+    
+    主要功能:
+    - 15+ 技术因子计算（动量、反转、波动率、成交量等）
+    - 8种专业因子评估指标（IC、IR、Rank IC、分层分析等）
+    - 支持多种动量计算方法（简单收益率、对数收益率、残差动量、动量加速度）
+    - 支持自定义因子列名，可在同一DataFrame中计算多个因子
+    
+    Examples:
+        基本因子分析流程：
+        >>> import polars as pl
+        >>> from polars_quant import Factor
+        >>> 
+        >>> # 准备数据
+        >>> df = pl.DataFrame({
+        ...     "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
+        ...     "symbol": ["AAPL", "AAPL", "AAPL"],
+        ...     "close": [150.0, 152.0, 148.0],
+        ...     "volume": [1000000, 1200000, 900000]
+        ... })
+        >>> 
+        >>> # 创建Factor实例
+        >>> factor = Factor()
+        >>> 
+        >>> # 计算动量因子
+        >>> df = factor.momentum(df, period=20)
+        >>> 
+        >>> # 计算波动率因子
+        >>> df = factor.volatility(df, period=20)
+        >>> 
+        >>> # 评估因子（需要先有收益率列）
+        >>> ic = factor.ic(df, "momentum", "return")
+        >>> ir = factor.ir(df, "momentum", "return")
+        
+        多种动量计算方法：
+        >>> # 简单收益率动量（默认）
+        >>> df = factor.momentum(df, period=20)
+        >>> 
+        >>> # 对数收益率动量
+        >>> df = factor.momentum(df, period=60, method="log", factor_col="log_momentum")
+        >>> 
+        >>> # 残差动量（去除市场整体趋势）
+        >>> df = factor.momentum(df, period=20, method="residual", factor_col="residual_mom")
+        >>> 
+        >>> # 动量加速度（捕捉趋势变化）
+        >>> df = factor.momentum(df, period=20, method="acceleration", factor_col="mom_accel")
+    """
+    
+    def __init__(self) -> None:
+        """创建Factor实例"""
+        ...
+    
+    # ================================================================
+    # 因子计算方法
+    # ================================================================
+    
+    def momentum(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20,
+        method: str = "return",
+        factor_col: str = "momentum"
+    ) -> pl.DataFrame:
+        """
+        动量因子（增强版）
+        
+        计算价格动量，支持多种计算方式
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+            method: 计算方法（默认"return"）
+                - "return": 简单收益率 (current - past) / past
+                - "log": 对数收益率 ln(current / past)
+                - "residual": 残差动量（去除市场整体趋势）
+                - "acceleration": 动量加速度（动量的变化率）
+            factor_col: 因子列名（默认"momentum"）
+        
+        Returns:
+            添加了动量因子列的DataFrame
+        
+        Examples:
+            >>> # 简单收益率动量（默认）
+            >>> df = factor.momentum(df, period=20)
+            >>> 
+            >>> # 对数收益率动量（适合长周期）
+            >>> df = factor.momentum(df, period=60, method="log")
+            >>> 
+            >>> # 残差动量（去除市场整体趋势）
+            >>> df = factor.momentum(df, period=20, method="residual")
+            >>> 
+            >>> # 动量加速度（捕捉趋势变化）
+            >>> df = factor.momentum(df, period=20, method="acceleration")
+        """
+        ...
+    
+    def reversal(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 5
+    ) -> pl.DataFrame:
+        """
+        反转因子
+        
+        短期反转效应：过去短期表现差的股票未来可能反转
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认5天）
+        
+        Returns:
+            添加了reversal因子列的DataFrame
+        """
+        ...
+    
+    def volatility(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        波动率因子
+        
+        计算价格的标准差作为波动率指标
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了volatility因子列的DataFrame
+        """
+        ...
+    
+    def volume_factor(
+        self,
+        df: pl.DataFrame,
+        volume_col: str = "volume",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        成交量因子
+        
+        计算成交量相对于均值的偏离程度
+        
+        Args:
+            df: 包含成交量数据的DataFrame
+            volume_col: 成交量列名（默认"volume"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了volume_factor因子列的DataFrame
+        """
+        ...
+    
+    def price_volume_corr(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        volume_col: str = "volume",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        价量相关性因子
+        
+        计算价格和成交量的滚动相关系数
+        
+        Args:
+            df: 包含价格和成交量数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            volume_col: 成交量列名（默认"volume"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了price_volume_corr因子列的DataFrame
+        """
+        ...
+    
+    def price_acceleration(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        价格加速度因子
+        
+        计算价格变化的加速度（二阶导数）
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了price_acceleration因子列的DataFrame
+        """
+        ...
+    
+    def skewness(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        偏度因子
+        
+        计算收益率分布的偏度
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了skewness因子列的DataFrame
+        """
+        ...
+    
+    def kurtosis(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        峰度因子
+        
+        计算收益率分布的峰度
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了kurtosis因子列的DataFrame
+        """
+        ...
+    
+    def max_drawdown(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        最大回撤因子
+        
+        计算过去N天的最大回撤
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了max_drawdown因子列的DataFrame
+        """
+        ...
+    
+    def turnover_factor(
+        self,
+        df: pl.DataFrame,
+        volume_col: str = "volume",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        换手率因子
+        
+        计算成交量的变化率
+        
+        Args:
+            df: 包含成交量数据的DataFrame
+            volume_col: 成交量列名（默认"volume"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了turnover_factor因子列的DataFrame
+        """
+        ...
+    
+    def amplitude_factor(
+        self,
+        df: pl.DataFrame,
+        high_col: str = "high",
+        low_col: str = "low",
+        close_col: str = "close",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        振幅因子
+        
+        计算平均振幅
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            high_col: 最高价列名（默认"high"）
+            low_col: 最低价列名（默认"low"）
+            close_col: 收盘价列名（默认"close"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了amplitude_factor因子列的DataFrame
+        """
+        ...
+    
+    def price_volume_divergence(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        volume_col: str = "volume",
+        period: int = 20
+    ) -> pl.DataFrame:
+        """
+        价量背离因子
+        
+        检测价格和成交量的背离情况
+        
+        Args:
+            df: 包含价格和成交量数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            volume_col: 成交量列名（默认"volume"）
+            period: 回看周期（默认20天）
+        
+        Returns:
+            添加了price_volume_divergence因子列的DataFrame
+        """
+        ...
+    
+    def rsi_factor(
+        self,
+        df: pl.DataFrame,
+        price_col: str = "close",
+        period: int = 14
+    ) -> pl.DataFrame:
+        """
+        RSI因子
+        
+        相对强弱指标，标准化到[-1, 1]区间
+        
+        Args:
+            df: 包含价格数据的DataFrame
+            price_col: 价格列名（默认"close"）
+            period: 回看周期（默认14天）
+        
+        Returns:
+            添加了rsi_factor因子列的DataFrame
+        """
+        ...
+    
+    # ================================================================
+    # 因子评估方法
+    # ================================================================
+    
+    def ic(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return"
+    ) -> float:
+        """
+        IC值（信息系数）
+        
+        IC = 因子值与未来收益率的Pearson相关系数
+        衡量因子对未来收益的线性预测能力
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+        
+        Returns:
+            IC值（范围 -1 到 1）
+        
+        评价标准:
+            - |IC| > 0.03: 因子有一定预测能力
+            - |IC| > 0.05: 因子较优秀
+            - |IC| > 0.10: 因子非常优秀
+        
+        Examples:
+            >>> ic = factor.ic(df, "momentum")
+            >>> print(f"IC值: {ic:.4f}")
+        """
+        ...
+    
+    def ir(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return",
+        period: int = 20
+    ) -> float:
+        """
+        IR值（信息比率）
+        
+        IR = IC均值 / IC标准差
+        衡量因子收益的稳定性和持续性
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+            period: 滚动计算IC的窗口期（默认20）
+        
+        Returns:
+            IR值
+        
+        评价标准:
+            - IR > 0.5: 因子较稳定
+            - IR > 1.0: 因子很稳定
+            - IR > 2.0: 因子非常优秀
+        """
+        ...
+    
+    def rank_ic(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return"
+    ) -> float:
+        """
+        Rank IC值（秩相关系数）
+        
+        计算因子排名与收益排名的相关性，相比IC更稳健
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+        
+        Returns:
+            Rank IC值（范围 -1 到 1）
+        
+        评价标准:
+            - |Rank IC| > 0.03: 因子有一定预测能力
+            - |Rank IC| > 0.05: 因子较优秀
+            - |Rank IC| > 0.10: 因子非常优秀
+        """
+        ...
+    
+    def quantile(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return",
+        n_quantiles: int = 5
+    ) -> pl.DataFrame:
+        """
+        分层分析
+        
+        按因子值分层，统计各层的平均收益
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+            n_quantiles: 分层数量（默认5）
+        
+        Returns:
+            包含quantile和mean_return列的DataFrame
+        
+        评价标准:
+            - 单调性：分层收益应呈现单调递增/递减
+            - 多空收益：最高层与最低层收益差
+            - 区分度：各层收益差异越大越好
+        """
+        ...
+    
+    def coverage(
+        self,
+        df: pl.DataFrame,
+        factor_col: str
+    ) -> float:
+        """
+        因子覆盖率
+        
+        计算非空因子值的比例
+        
+        Args:
+            df: 包含因子数据的DataFrame
+            factor_col: 因子列名
+        
+        Returns:
+            覆盖率（0-1之间的比例）
+        
+        评价标准:
+            - 覆盖率 > 0.8: 因子覆盖充分
+            - 覆盖率 > 0.9: 因子覆盖良好
+        """
+        ...
+    
+    def ic_win_rate(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return",
+        period: int = 20
+    ) -> float:
+        """
+        IC胜率
+        
+        IC胜率 = IC>0的次数 / 总次数
+        衡量因子预测方向的准确率
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+            period: 滚动窗口（默认20）
+        
+        Returns:
+            IC胜率（0-1之间的比例）
+        
+        评价标准:
+            - IC胜率 > 0.5: 因子有预测能力
+            - IC胜率 > 0.6: 因子较强
+            - IC胜率 > 0.7: 因子很强
+        """
+        ...
+    
+    def long_short(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str = "return",
+        n_quantiles: int = 5
+    ) -> float:
+        """
+        多空收益
+        
+        多空收益 = 最高分位收益 - 最低分位收益
+        衡量因子的盈利能力
+        
+        Args:
+            df: 包含因子和收益率数据的DataFrame
+            factor_col: 因子列名
+            return_col: 未来收益率列名（默认"return"）
+            n_quantiles: 分层数量（默认5）
+        
+        Returns:
+            多空收益（最高层收益 - 最低层收益）
+        """
+        ...
+    
+    def turnover(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        date_col: str = "date",
+        group_col: str = "symbol",
+        n_quantiles: int = 5
+    ) -> float:
+        """
+        因子换手率
+        
+        换手率 = 相邻两期分层组合中股票变化的比例
+        衡量因子的稳定性，换手率越低表示因子越稳定
+        
+        Args:
+            df: 包含因子数据的DataFrame（需要包含时间列和分组列）
+            factor_col: 因子列名
+            date_col: 时间列名（默认"date"）
+            group_col: 分组列名（如股票代码，默认"symbol"）
+            n_quantiles: 分层数量（默认5）
+        
+        Returns:
+            平均换手率（0-2之间，单边换手率）
+        
+        评价标准:
+            - 换手率 < 0.3: 因子很稳定
+            - 换手率 < 0.5: 因子较稳定
+            - 换手率 > 0.7: 因子不稳定
+        
+        说明:
+            换手率的计算方法：
+            1. 对每个时间截面，按因子值将股票分为n_quantiles组
+            2. 对于相邻两期，计算每组中股票的变化比例
+            3. 换手率 = (新增股票数 + 减少股票数) / (2 × 组内股票总数)
+        """
+        ...

@@ -1,4 +1,4 @@
-# polars-quant 🧮📊
+﻿# polars-quant 🧮📊
 
 > 基于 Rust + Polars 的高性能量化分析与回测工具集，提供丰富的技术指标计算和独立资金池回测引擎。
 
@@ -11,12 +11,15 @@
 
 - 🚀 **高性能**：基于 Rust 实现，底层使用 Polars 数据处理，速度快、内存占用低
 - 📊 **丰富指标**：提供 50+ 常用技术指标（移动平均、动量、震荡、成交量等）
+- 🎯 **交易策略**：15+ 内置策略（MA、MACD、RSI、布林带、KDJ、突破、反转等）
+- 🔬 **因子挖掘**：15+ 技术因子计算 + 8种专业评估指标（IC、IR、Rank IC等）
 - 🎯 **股票筛选**：链式调用的选择器，支持 30+ 筛选条件组合，批量加载多种文件格式
 - 💰 **独立资金池**：每只股票使用独立资金池回测，智能并行处理
+- 📈 **杠杆交易**：支持融资融券回测，可设置杠杆倍数、保证金阈值、利息计算
 - 🎯 **真实模拟**：支持佣金（含最低佣金）、滑点、整百股交易等实盘规则
-- 📈 **详细统计**：提供夏普比率、索提诺比率、卡尔马比率等 12 类详细指标
+- � **详细统计**：提供夏普比率、索提诺比率、卡尔马比率等 12 类详细指标
 - 🔍 **灵活分析**：支持全局汇总和单股票深度分析
-- 📉 **基准对比**：支持与基准指数对比，计算Alpha和相对收益
+- 📉 **基准对比**：支持与基准指数对比，计算Alpha、Beta和相对收益
 - 💹 **每日绩效**：详细记录每日盈亏、累计收益等绩效指标
 
 ## 📦 安装
@@ -40,7 +43,7 @@ maturin develop --release
 
 #### 1. 构造函数
 
-##### `Backtest(prices, buy_signals, sell_signals, initial_capital, commission_rate, min_commission, slippage, benchmark)`
+##### `Backtest(prices, buy_signals, sell_signals, initial_capital, position_size, leverage, margin_call_threshold, interest_rate, commission_rate, min_commission, slippage, benchmark)`
 
 创建回测实例。
 
@@ -49,6 +52,10 @@ maturin develop --release
 - `buy_signals` (DataFrame): 买入信号，第一列为日期，其余列为布尔值（True 表示买入，False 表示不买入）
 - `sell_signals` (DataFrame): 卖出信号，第一列为日期，其余列为布尔值（True 表示卖出，False 表示不卖出）
 - `initial_capital` (float): 初始资金，默认 100000.0
+- `position_size` (float): 每次交易仓位大小（0.0-1.0），默认 1.0
+- `leverage` (float): 杠杆倍数，默认 1.0（无杠杆）
+- `margin_call_threshold` (float): 保证金预警阈值，默认 0.3
+- `interest_rate` (float): 融资年化利率，默认 0.06
 - `commission_rate` (float): 佣金费率，默认 0.0003（万三）
 - `min_commission` (float): 最低佣金，默认 5.0 元
 - `slippage` (float): 滑点，默认 0.0（0.001 表示 0.1%）
@@ -69,7 +76,8 @@ bt = Backtest(
     buy_signals=buy_df,
     sell_signals=sell_df,
     initial_capital=100000.0,
-    commission_rate=0.0003,  # 万三
+    leverage=2.0,             # 2倍杠杆
+    commission_rate=0.0003,   # 万三
     min_commission=5.0,       # 最低5元
     slippage=0.001,           # 0.1%滑点
     benchmark=benchmark_df    # 基准对比
@@ -328,13 +336,13 @@ print(bt.get_stock_summary("AAPL"))
 
 ---
 
-### 二、股票选择器 (StockSelector)
+### 二、股票选择器 (Selector)
 
 股票选择器提供链式调用的股票筛选功能，支持从文件夹批量加载数据，并使用 30+ 筛选参数进行多条件组合筛选。
 
 #### 1. 创建选择器
 
-##### `StockSelector(ohlcv_data)`
+##### `Selector(ohlcv_data)`
 
 从 DataFrame 创建选择器。
 
@@ -349,7 +357,7 @@ print(bt.get_stock_summary("AAPL"))
 
 **示例**：
 ```python
-from polars_quant import StockSelector
+from polars_quant import Selector
 import polars as pl
 
 df = pl.DataFrame({
@@ -361,12 +369,12 @@ df = pl.DataFrame({
     "AAPL_volume": [1000000.0, 1200000.0]
 })
 
-selector = StockSelector(df)
+selector = Selector(df)
 ```
 
 ---
 
-##### `StockSelector.from_folder(folder, file_type, prefix, suffix, has_header)`
+##### `Selector.from_folder(folder, file_type, prefix, suffix, has_header)`
 
 从文件夹批量加载股票数据。
 
@@ -377,21 +385,21 @@ selector = StockSelector(df)
 - `suffix` (str, 可选): 文件名后缀过滤
 - `has_header` (bool): CSV/Excel 文件是否包含表头，默认 True
 
-**返回**：StockSelector 实例
+**返回**：Selector 实例
 
 **示例**：
 ```python
 # 加载所有格式文件
-selector = StockSelector.from_folder("data/stocks")
+selector = Selector.from_folder("data/stocks")
 
 # 只加载 parquet 文件
-selector = StockSelector.from_folder("data/stocks", file_type="parquet")
+selector = Selector.from_folder("data/stocks", file_type="parquet")
 
 # 只加载上海股票（SH 开头）
-selector = StockSelector.from_folder("data/stocks", prefix="SH")
+selector = Selector.from_folder("data/stocks", prefix="SH")
 
 # 加载多种格式
-selector = StockSelector.from_folder("data/stocks", file_type=["parquet", "csv"])
+selector = Selector.from_folder("data/stocks", file_type=["parquet", "csv"])
 ```
 
 ---
@@ -577,7 +585,143 @@ print(df)
 
 ---
 
-### 三、技术指标函数
+### 三、交易策略 (Strategy)
+
+交易策略模块提供 15 种常用交易策略，每个策略返回包含 `buy_signal` 和 `sell_signal` 列的 DataFrame。
+
+#### 1. 创建策略实例
+
+```python
+from polars_quant import Strategy
+
+strategy = Strategy()
+```
+
+#### 2. 策略方法
+
+##### MA 均线策略
+
+**`ma(df, price_col, fast_period, slow_period, ma_type, trend_period, trend_filter, slope_filter, distance_pct)`**
+
+MA均线策略，支持多种过滤条件。
+
+**参数**：
+- `df` (DataFrame): 包含价格数据的DataFrame
+- `price_col` (str): 价格列名，默认 `"close"`
+- `fast_period` (int): 快线周期，默认 10
+- `slow_period` (int): 慢线周期，默认 20
+- `ma_type` (str): 均线类型，默认 `"sma"`，可选 `"sma"`, `"ema"`, `"wma"`, `"dema"`, `"tema"`
+- `trend_period` (int): 趋势过滤均线周期，默认 0（不使用）
+- `trend_filter` (bool): 是否启用趋势过滤，默认 False
+- `slope_filter` (bool): 是否启用斜率过滤，默认 False
+- `distance_pct` (float): 价格与均线最小距离百分比，默认 0.0（不使用）
+
+**返回**：包含 `buy_signal` 和 `sell_signal` 列的DataFrame
+
+**示例**：
+```python
+# 简单MA策略
+signals = strategy.ma(df, fast_period=5, slow_period=10)
+
+# 带趋势过滤的MA策略
+signals = strategy.ma(df, fast_period=10, slow_period=20,
+                      trend_period=60, trend_filter=True)
+
+# EMA策略
+signals = strategy.ma(df, ma_type="ema", fast_period=12, slow_period=26)
+```
+
+---
+
+##### MACD 策略
+
+**`macd(df, price_col, fast_period, slow_period, signal_period)`**
+
+**参数**：
+- `fast_period` (int): 快线周期，默认 12
+- `slow_period` (int): 慢线周期，默认 26
+- `signal_period` (int): 信号线周期，默认 9
+
+**示例**：
+```python
+signals = strategy.macd(df)
+```
+
+---
+
+##### RSI 策略
+
+**`rsi(df, price_col, period, oversold, overbought)`**
+
+**参数**：
+- `period` (int): RSI周期，默认 14
+- `oversold` (float): 超卖阈值，默认 30.0
+- `overbought` (float): 超买阈值，默认 70.0
+
+**示例**：
+```python
+signals = strategy.rsi(df, period=14, oversold=30, overbought=70)
+```
+
+---
+
+##### 其他策略方法
+
+- **`bband(df, ...)`** - 布林带策略
+- **`stoch(df, ...)`** - KDJ/随机指标策略
+- **`cci(df, ...)`** - CCI顺势指标策略
+- **`adx(df, ...)`** - ADX趋势强度策略
+- **`breakout(df, ...)`** - 突破策略（Donchian Channel）
+- **`reversion(df, ...)`** - 均值回归策略
+- **`volume(df, ...)`** - 成交量突破策略
+- **`grid(df, ...)`** - 网格交易策略
+- **`gap(df, ...)`** - 跳空缺口策略
+- **`pattern(df, ...)`** - K线形态策略
+- **`trend(df, ...)`** - 多均线趋势策略
+
+详细参数请参考 API 文档（`polars_quant.pyi`）。
+
+#### 3. 策略组合示例
+
+```python
+import polars as pl
+from polars_quant import Strategy
+
+# 准备数据
+df = pl.DataFrame({
+    "date": ["2024-01-01", "2024-01-02"],
+    "open": [100.0, 102.0],
+    "high": [105.0, 106.0],
+    "low": [99.0, 101.0],
+    "close": [103.0, 104.0],
+    "volume": [1000000, 1200000]
+})
+
+strategy = Strategy()
+
+# 1. 单一策略
+ma_signals = strategy.ma(df, fast_period=5, slow_period=10)
+
+# 2. 组合策略（同时满足多个条件）
+ma_sig = strategy.ma(df, fast_period=5, slow_period=10)
+rsi_sig = strategy.rsi(df, period=14, oversold=30, overbought=70)
+
+# 买入信号：MA金叉且RSI不超买
+combined = ma_sig.with_columns([
+    (pl.col("buy_signal") & rsi_sig["buy_signal"]).alias("buy_signal"),
+    (pl.col("sell_signal") | rsi_sig["sell_signal"]).alias("sell_signal")
+])
+
+# 3. 趋势过滤策略
+# 只在长期趋势向上时交易
+trend_ma = strategy.ma(df, fast_period=10, slow_period=20,
+                       trend_period=60, trend_filter=True,
+                       slope_filter=True)
+```
+
+---
+
+### 四、技术指标函数
 
 所有指标函数接受 Polars Series 作为输入，返回 Polars Series 或元组。
 
@@ -918,10 +1062,10 @@ tr = trange(pl.col("high"), pl.col("low"), pl.col("close"))
 
 ```python
 import polars as pl
-from polars_quant import Backtest, StockSelector, sma, rsi
+from polars_quant import Backtest, Selector, Strategy, sma, rsi
 
 # 1. 股票筛选
-selector = StockSelector.from_folder("data/stocks")
+selector = Selector.from_folder("data/stocks")
 selected = selector.filter(
     min_price=10.0,
     max_price=100.0,
@@ -929,14 +1073,21 @@ selected = selector.filter(
     min_return_5d=0.02  # 5日涨幅 > 2%
 ).sort(by="return_5d", ascending=False, top_n=10).result()
 
-# 2. 计算技术指标
+# 2. 使用交易策略生成信号
+strategy = Strategy()
+signals = strategy.ma(df, fast_period=5, slow_period=20)
+# 或使用组合策略
+ma_signals = strategy.ma(df, fast_period=10, slow_period=20)
+rsi_signals = strategy.rsi(df, period=14, oversold=30, overbought=70)
+
+# 3. 或手动计算技术指标
 df = pl.read_parquet("stock_data.parquet")
 df = df.with_columns([
     sma(pl.col("close"), 20).alias("ma20"),
     rsi(pl.col("close"), 14).alias("rsi")
 ])
 
-# 3. 生成买卖信号
+# 4. 生成买卖信号
 buy_signals = df.select([
     pl.col("date"),
     ((pl.col("close") > pl.col("ma20")) & (pl.col("rsi") < 30)).alias("AAPL")
@@ -947,16 +1098,119 @@ sell_signals = df.select([
     ((pl.col("close") < pl.col("ma20")) | (pl.col("rsi") > 70)).alias("AAPL")
 ])
 
-# 4. 回测
+# 5. 回测
 bt = Backtest(
     prices=df.select(["date", "AAPL"]),
     buy_signals=buy_signals,
     sell_signals=sell_signals,
-    initial_capital=100000.0
+    initial_capital=100000.0,
+    leverage=2.0  # 杠杆倍数
 )
 bt.run()
 bt.summary()  # 查看详细统计
 ```
+
+---
+
+## � 因子挖掘与评估
+
+polars-quant 提供了强大的因子挖掘和评估工具，支持多种技术因子计算和专业的因子评估指标。
+
+### 因子分析完整流程
+
+```python
+import polars as pl
+from polars_quant import Factor
+
+# 1. 准备数据
+df = pl.DataFrame({
+    "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
+    "symbol": ["AAPL", "AAPL", "AAPL"],
+    "close": [150.0, 152.0, 148.0],
+    "high": [151.0, 153.0, 149.0],
+    "low": [149.0, 151.0, 147.0],
+    "volume": [1000000, 1200000, 900000]
+})
+
+# 2. 创建Factor实例
+factor = Factor()
+
+# 3. 计算因子
+df = factor.momentum(df, period=20)              # 动量因子
+df = factor.volatility(df, period=20)            # 波动率因子
+df = factor.volume_factor(df, period=20)         # 成交量因子
+df = factor.rsi_factor(df, period=14)            # RSI因子
+
+# 4. 评估因子（需要先添加收益率列 "return"）
+ic = factor.ic(df, "momentum")                   # 信息系数
+ir = factor.ir(df, "momentum")                   # 信息比率
+rank_ic = factor.rank_ic(df, "momentum")         # 秩相关系数
+quantile_df = factor.quantile(df, "momentum")    # 分层分析
+win_rate = factor.ic_win_rate(df, "momentum")    # IC胜率
+ls_return = factor.long_short(df, "momentum")    # 多空收益
+turnover_rate = factor.turnover(df, "momentum")  # 换手率
+
+print(f"IC: {ic:.4f}, IR: {ir:.4f}, Rank IC: {rank_ic:.4f}")
+print(f"IC胜率: {win_rate:.2%}, 多空收益: {ls_return:.4f}")
+```
+
+### 多种动量计算方法
+
+```python
+# 1. 简单收益率动量（默认）
+df = factor.momentum(df, period=20)
+
+# 2. 对数收益率动量（适合长周期）
+df = factor.momentum(df, period=60, method="log", factor_col="log_momentum")
+
+# 3. 残差动量（去除市场整体趋势）
+df = factor.momentum(df, period=20, method="residual", factor_col="residual_mom")
+
+# 4. 动量加速度（捕捉趋势变化）
+df = factor.momentum(df, period=20, method="acceleration", factor_col="mom_accel")
+
+# 5. 批量评估多个因子
+for col in ["momentum", "log_momentum", "residual_mom", "mom_accel"]:
+    ic = factor.ic(df, col)
+    print(f"{col}: IC={ic:.4f}")
+```
+
+### 可用的因子
+
+**技术因子（15+）**：
+- `momentum()` - 动量因子（支持4种计算方法）
+- `reversal()` - 反转因子
+- `volatility()` - 波动率因子
+- `volume_factor()` - 成交量因子
+- `price_volume_corr()` - 价量相关性
+- `price_acceleration()` - 价格加速度
+- `skewness()` - 偏度因子
+- `kurtosis()` - 峰度因子
+- `max_drawdown()` - 最大回撤因子
+- `turnover_factor()` - 换手率因子
+- `amplitude_factor()` - 振幅因子
+- `price_volume_divergence()` - 价量背离
+- `rsi_factor()` - RSI因子
+
+**评估指标（8种）**：
+- `ic()` - IC值（信息系数）
+- `ir()` - IR值（信息比率）
+- `rank_ic()` - Rank IC（秩相关系数）
+- `quantile()` - 分层分析
+- `coverage()` - 因子覆盖率
+- `ic_win_rate()` - IC胜率
+- `long_short()` - 多空收益
+- `turnover()` - 因子换手率
+
+### 因子评估标准
+
+| 指标 | 优秀标准 | 较好标准 | 一般标准 |
+|------|---------|---------|---------|
+| IC | \|IC\| > 0.10 | \|IC\| > 0.05 | \|IC\| > 0.03 |
+| IR | IR > 2.0 | IR > 1.0 | IR > 0.5 |
+| Rank IC | \|Rank IC\| > 0.10 | \|Rank IC\| > 0.05 | \|Rank IC\| > 0.03 |
+| IC胜率 | > 0.7 | > 0.6 | > 0.5 |
+| 换手率 | < 0.3 | < 0.5 | < 0.7 |
 
 ---
 
