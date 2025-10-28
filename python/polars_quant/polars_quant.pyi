@@ -3,8 +3,11 @@ polars-quant 类型提示文件
 提供所有技术分析函数的类型注释和使用示例
 
 主要功能模块：
-1. 技术指标 (Technical Analysis) - 各种技术分析指标函数
-2. 回测引擎 (Backtesting) - 高性能多线程回测系统
+1. 数据处理 (Data Processing) - 收益率计算、数据加载
+2. 技术指标 (Technical Analysis) - 各种技术分析指标函数
+3. 回测引擎 (Backtesting) - 高性能多线程回测系统
+4. 选股器 (Stock Selector) - 多维度股票筛选
+5. 因子分析 (Factor Analysis) - 因子计算与评估
 
 安装使用：
     pip install polars-quant
@@ -17,13 +20,105 @@ polars-quant 类型提示文件
     prices = pl.Series([1, 2, 3, 4, 5])
     sma_result = pq.sma(prices, 3)
     
+    # 计算收益率
+    df = pl.DataFrame({"date": [...], "close": [...]})
+    df = pq.returns(df, price_col="close", period=1, method="simple")
+    
+    # 加载数据
+    data = pq.load("./data", file_type=["parquet", "csv"])
+    
     # 运行回测
-    result = pq.Backtrade.run(data, entries, exits)
+    result = pq.Backtest.run(data, entries, exits)
     result.summary()
 """
 
 import polars as pl
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Literal
+
+# ====================================================================
+# 数据处理模块 (Data Processing)
+# ====================================================================
+
+def returns(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    period: int = 1,
+    method: Literal["simple", "log"] = "simple",
+    return_col: str = "return"
+) -> pl.DataFrame:
+    """
+    计算收益率
+    
+    Args:
+        df: 输入DataFrame
+        price_col: 价格列名，默认 "close"
+        period: 计算周期，默认 1
+        method: 计算方法
+            - "simple": 简单收益率 (price[t] - price[t-period]) / price[t-period]
+            - "log": 对数收益率 ln(price[t] / price[t-period])
+        return_col: 返回列名，默认 "return"
+    
+    Returns:
+        添加了收益率列的 DataFrame
+    
+    Examples:
+        >>> import polars as pl
+        >>> import polars_quant as pq
+        >>> 
+        >>> # 计算简单收益率
+        >>> df = pl.DataFrame({
+        ...     "date": ["2023-01-01", "2023-01-02", "2023-01-03"],
+        ...     "close": [100.0, 102.0, 101.0]
+        ... })
+        >>> result = pq.returns(df, price_col="close", period=1, method="simple")
+        >>> # 结果包含原始列 + return列: [None, 0.02, -0.0098]
+        >>> 
+        >>> # 计算对数收益率
+        >>> result = pq.returns(df, method="log", return_col="log_return")
+    """
+    ...
+
+def load(
+    folder: str,
+    file_type: Optional[List[str]] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+    has_header: bool = True
+) -> pl.DataFrame:
+    """
+    从文件夹批量加载股票数据
+    
+    Args:
+        folder: 数据文件夹路径
+        file_type: 文件类型列表，支持 ["parquet", "csv", "xlsx", "xls", "json", "feather", "ipc"]
+                  None 表示支持所有格式
+        prefix: 文件名前缀过滤（可选）
+        suffix: 文件名后缀过滤（可选）
+        has_header: CSV/Excel 文件是否包含表头，默认 True
+    
+    Returns:
+        合并后的 DataFrame，列格式: date, {symbol}_open, {symbol}_high, {symbol}_low, {symbol}_close, {symbol}_volume
+    
+    Examples:
+        >>> import polars_quant as pq
+        >>> 
+        >>> # 加载所有 parquet 文件
+        >>> data = pq.load("./stock_data", file_type=["parquet"])
+        >>> 
+        >>> # 加载特定前缀的 CSV 文件
+        >>> data = pq.load("./stock_data", file_type=["csv"], prefix="SH")
+        >>> 
+        >>> # 加载所有支持格式的文件
+        >>> data = pq.load("./stock_data")
+    
+    Notes:
+        - 每个文件应包含 date, open, high, low, close, volume 列
+        - 文件名（去除扩展名）将作为股票代码
+        - 加载后列名格式为: {股票代码}_{列名}，如 AAPL_close, TSLA_volume
+        - 所有数据按 date 列进行外连接 (Full Join)
+        - 结果按日期排序
+    """
+    ...
 
 # ====================================================================
 # 回测引擎 (Backtesting Engine) - 独立资金池回测系统
@@ -472,23 +567,21 @@ class Selector:
     股票选择器 - 支持链式调用的股票筛选工具
     
     功能特点:
-    - 从文件夹批量加载股票数据（支持 parquet/csv/xlsx/xls/json/feather/ipc）
+    - 链式调用支持多条件组合筛选
     - 单一 filter() 方法支持 30+ 筛选参数
-    - 支持链式调用进行多条件组合筛选
     - 内置技术指标计算（MA、RSI、MACD、KDJ 等）
     - 支持排序和取 TopN
     
     Examples:
         基本用法：
+        >>> import polars as pl
         >>> import polars_quant as pq
         >>> 
-        >>> # 从文件夹加载数据
-        >>> selector = pq.Selector.from_folder(
-        ...     "data/stocks",
-        ...     file_type="parquet",  # 可选: parquet/csv/xlsx/xls/json/feather/ipc
-        ...     prefix="SH",          # 可选: 只加载以 SH 开头的文件
-        ...     has_header=True       # CSV/Excel 是否有表头
-        ... )
+        >>> # 使用 load 函数加载数据
+        >>> data = pq.load("data/stocks", file_type=["parquet"])
+        >>> 
+        >>> # 创建 Selector
+        >>> selector = pq.Selector(data)
         >>> 
         >>> # 链式筛选示例
         >>> result = (
@@ -536,46 +629,6 @@ class Selector:
         
         Raises:
             ValueError: OHLCV 数据至少需要 2 列
-        """
-        ...
-    
-    @staticmethod
-    def from_folder(
-        folder: str,
-        file_type: Optional[str | List[str]] = None,
-        prefix: Optional[str] = None,
-        suffix: Optional[str] = None,
-        has_header: bool = True
-    ) -> 'Selector':
-        """
-        从文件夹批量加载股票数据
-        
-        Args:
-            folder: 数据文件夹路径
-            file_type: 文件类型，可选值: "parquet", "csv", "xlsx", "xls", "json", 
-                      "feather", "ipc" 或列表。默认支持所有格式
-            prefix: 文件名前缀过滤（可选）
-            suffix: 文件名后缀过滤（可选）
-            has_header: CSV/Excel 文件是否包含表头（默认 True）
-        
-        Returns:
-            Selector 实例
-        
-        Raises:
-            ValueError: 不是有效的目录
-            ValueError: file_type 必须是字符串或字符串列表
-            ValueError: 未找到匹配的文件
-            ValueError: 文件缺少必需的列 (date/open/high/low/close/volume)
-        
-        Examples:
-            >>> # 加载所有支持格式的文件
-            >>> selector = pq.Selector.from_folder("data/stocks")
-            >>> 
-            >>> # 只加载 parquet 文件
-            >>> selector = pq.Selector.from_folder("data/stocks", file_type="parquet")
-            >>> 
-            >>> # 只加载上海股票（SH 开头）
-            >>> selector = pq.Selector.from_folder("data/stocks", prefix="SH")
         """
         ...
     

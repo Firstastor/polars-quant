@@ -5,9 +5,16 @@ mod backtest;
 mod selector;
 mod strategy;
 mod factor;
+mod data;
 
 #[pymodule]
 fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // ====================================================================
+    // 数据处理模块 (Data Processing)
+    // ====================================================================
+    m.add_function(wrap_pyfunction!(data::returns, m)?)?;
+    m.add_function(wrap_pyfunction!(data::load, m)?)?;
+    
     // ====================================================================
     // 回测模块 (Backtesting)
     // ====================================================================

@@ -39,7 +39,130 @@ maturin develop --release
 
 ## 📚 API 参考
 
-### 一、回测类 (Backtest)
+### 一、数据处理函数
+
+#### 1. 收益率计算
+
+##### `returns(df, price_col, period, method, return_col)`
+
+计算价格收益率。
+
+**参数**：
+- `df` (DataFrame): 包含价格数据的 DataFrame
+- `price_col` (str): 价格列名，默认 `"close"`
+- `period` (int): 收益率周期，默认 1
+- `method` (str): 计算方法，默认 `"simple"`
+  - `"simple"`: 简单收益率 = (price[t] - price[t-period]) / price[t-period]
+  - `"log"`: 对数收益率 = ln(price[t] / price[t-period])
+- `return_col` (str): 收益率列名，默认 `"return"`
+
+**返回**：DataFrame（在原 DataFrame 基础上添加收益率列）
+
+**示例**：
+```python
+import polars as pl
+from polars_quant import returns
+
+# 准备数据
+df = pl.DataFrame({
+    "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+    "close": [100.0, 102.0, 101.0, 105.0]
+})
+
+# 1日简单收益率
+df = returns(df, price_col="close", period=1, method="simple")
+print(df)
+# 输出包含 "return" 列：[None, 0.02, -0.0098, 0.0396]
+
+# 5日对数收益率
+df = returns(df, price_col="close", period=5, method="log", return_col="log_return_5d")
+
+# 计算多个周期的收益率
+df = returns(df, period=1, return_col="return_1d")
+df = returns(df, period=5, return_col="return_5d")
+df = returns(df, period=20, return_col="return_20d")
+```
+
+---
+
+#### 2. 批量数据加载
+
+##### `load(folder, file_type, prefix, suffix, has_header)`
+
+从文件夹批量加载股票数据，支持多种文件格式。
+
+**参数**：
+- `folder` (str): 数据文件夹路径
+- `file_type` (List[str], 可选): 文件类型列表，默认加载所有支持的格式
+  - 支持：`"parquet"`, `"csv"`, `"json"`, `"feather"`, `"ipc"`, `"xlsx"`, `"xls"`
+- `prefix` (str, 可选): 文件名前缀过滤
+- `suffix` (str, 可选): 文件名后缀过滤（扩展名之前的部分）
+- `has_header` (bool): 是否包含表头，默认 True
+
+**返回**：DataFrame，格式为：
+- 第一列：`date`（日期）
+- 其余列：`{symbol}_{column}`（如 `AAPL_open`, `AAPL_close` 等）
+
+**数据要求**：
+- 每个文件代表一只股票
+- 文件名即为股票代码（不含扩展名）
+- 必须包含 `date` 列
+- 自动按日期进行 Full Join 合并
+
+**示例**：
+```python
+from polars_quant import load
+
+# 1. 加载所有 parquet 文件
+data = load("data/stocks", file_type=["parquet"])
+
+# 2. 加载 CSV 和 Excel 文件
+data = load("data/stocks", file_type=["csv", "xlsx"])
+
+# 3. 使用前缀过滤（只加载上海股票）
+data = load("data/stocks", prefix="SH", file_type=["parquet"])
+
+# 4. 使用后缀过滤
+data = load("data/stocks", suffix="_daily", file_type=["csv"])
+
+# 5. 加载所有支持格式（默认）
+data = load("data/stocks")
+
+# 6. 查看结果
+print(data.columns)
+# ['date', 'AAPL_open', 'AAPL_high', 'AAPL_low', 'AAPL_close', 'AAPL_volume', 
+#  'GOOGL_open', 'GOOGL_high', ...]
+
+# 7. 配合 Selector 使用
+from polars_quant import Selector
+selector = Selector(data)
+selected = selector.filter(price_min=10, volume_min=1000000).result()
+```
+
+**文件夹结构示例**：
+```
+data/stocks/
+├── AAPL.parquet
+├── GOOGL.parquet
+├── MSFT.csv
+├── TSLA.xlsx
+└── ...
+```
+
+**返回的 DataFrame 结构**：
+```python
+shape: (252, 11)
+┌────────────┬────────────┬────────────┬─────────────┬───┐
+│ date       │ AAPL_open  │ AAPL_high  │ AAPL_close  │ … │
+├────────────┼────────────┼────────────┼─────────────┼───┤
+│ 2024-01-01 │ 150.0      │ 155.0      │ 153.0       │ … │
+│ 2024-01-02 │ 152.0      │ 157.0      │ 154.0       │ … │
+└────────────┴────────────┴────────────┴─────────────┴───┘
+```
+
+---
+
+### 二、回测类 (Backtest)
 
 #### 1. 构造函数
 
@@ -336,7 +459,7 @@ print(bt.get_stock_summary("AAPL"))
 
 ---
 
-### 二、股票选择器 (Selector)
+### 三、股票选择器 (Selector)
 
 股票选择器提供链式调用的股票筛选功能，支持从文件夹批量加载数据，并使用 30+ 筛选参数进行多条件组合筛选。
 
@@ -370,36 +493,6 @@ df = pl.DataFrame({
 })
 
 selector = Selector(df)
-```
-
----
-
-##### `Selector.from_folder(folder, file_type, prefix, suffix, has_header)`
-
-从文件夹批量加载股票数据。
-
-**参数**：
-- `folder` (str): 数据文件夹路径
-- `file_type` (str | list, 可选): 文件类型，支持 `"parquet"`, `"csv"`, `"xlsx"`, `"xls"`, `"json"`, `"feather"`, `"ipc"` 或列表。默认支持所有格式
-- `prefix` (str, 可选): 文件名前缀过滤
-- `suffix` (str, 可选): 文件名后缀过滤
-- `has_header` (bool): CSV/Excel 文件是否包含表头，默认 True
-
-**返回**：Selector 实例
-
-**示例**：
-```python
-# 加载所有格式文件
-selector = Selector.from_folder("data/stocks")
-
-# 只加载 parquet 文件
-selector = Selector.from_folder("data/stocks", file_type="parquet")
-
-# 只加载上海股票（SH 开头）
-selector = Selector.from_folder("data/stocks", prefix="SH")
-
-# 加载多种格式
-selector = Selector.from_folder("data/stocks", file_type=["parquet", "csv"])
 ```
 
 ---
@@ -585,7 +678,7 @@ print(df)
 
 ---
 
-### 三、交易策略 (Strategy)
+### 四、交易策略 (Strategy)
 
 交易策略模块提供 15 种常用交易策略，每个策略返回包含 `buy_signal` 和 `sell_signal` 列的 DataFrame。
 
@@ -721,7 +814,7 @@ trend_ma = strategy.ma(df, fast_period=10, slow_period=20,
 
 ---
 
-### 四、技术指标函数
+### 五、技术指标函数
 
 所有指标函数接受 Polars Series 作为输入，返回 Polars Series 或元组。
 
@@ -1062,15 +1155,18 @@ tr = trange(pl.col("high"), pl.col("low"), pl.col("close"))
 
 ```python
 import polars as pl
-from polars_quant import Backtest, Selector, Strategy, sma, rsi
+from polars_quant import Backtest, Selector, Strategy, sma, rsi, load
 
 # 1. 股票筛选
-selector = Selector.from_folder("data/stocks")
+# 使用 load 函数加载数据
+data = load("data/stocks", file_type=["parquet"])
+selector = Selector(data)
 selected = selector.filter(
-    min_price=10.0,
-    max_price=100.0,
-    min_volume=1000000,
-    min_return_5d=0.02  # 5日涨幅 > 2%
+    price_min=10.0,
+    price_max=100.0,
+    volume_min=1000000,
+    return_min=0.02,  # 收益率 > 2%
+    return_period=5
 ).sort(by="return_5d", ascending=False, top_n=10).result()
 
 # 2. 使用交易策略生成信号
