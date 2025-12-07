@@ -1,14 +1,177 @@
-use polars::prelude::*;
+﻿use polars::prelude::*;
 use pyo3::prelude::*;
 use pyo3_polars::PyDataFrame;
 
-/// 因子挖掘和评估模块
-/// 
-/// 提供因子计算、因子评估、IC分析等功能
+// 辅助函数：计算Pearson相关系数
+fn calculate_pearson_corr(x: &Series, y: &Series) -> PyResult<f64> {
+    let x_f64 = x.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+    let y_f64 = y.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
 
-// ============================================================================
-// 因子计算 (Factor Calculation)
-// ============================================================================
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
+    let mut sum_y2 = 0.0;
+    let mut count = 0;
+
+    for i in 0..x_f64.len() {
+        if let (Some(xi), Some(yi)) = (x_f64.get(i), y_f64.get(i)) {
+            if !xi.is_nan() && !yi.is_nan() {
+                sum_x += xi;
+                sum_y += yi;
+                sum_xy += xi * yi;
+                sum_x2 += xi * xi;
+                sum_y2 += yi * yi;
+                count += 1;
+            }
+        }
+    }
+
+    if count < 2 {
+        return Ok(f64::NAN);
+    }
+
+    let n = count as f64;
+    let numerator = n * sum_xy - sum_x * sum_y;
+    let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
+
+    if denominator == 0.0 {
+        Ok(f64::NAN)
+    } else {
+        Ok(numerator / denominator)
+    }
+}
+
+// 辅助函数：计算Spearman秩相关系数
+fn calculate_spearman_corr(x: &Series, y: &Series) -> PyResult<f64> {
+    let x_f64 = x.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+    let y_f64 = y.f64().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+    // 收集有效数据对
+    let mut pairs: Vec<(f64, f64)> = Vec::new();
+    for i in 0..x_f64.len() {
+        if let (Some(xi), Some(yi)) = (x_f64.get(i), y_f64.get(i)) {
+            if !xi.is_nan() && !yi.is_nan() {
+                pairs.push((xi, yi));
+            }
+        }
+    }
+
+    if pairs.len() < 2 {
+        return Ok(f64::NAN);
+    }
+
+    // 计算x的排名
+    let mut x_ranks = vec![0.0; pairs.len()];
+    let mut x_sorted: Vec<(usize, f64)> = pairs.iter().enumerate().map(|(i, (x, _))| (i, *x)).collect();
+    x_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (rank, (idx, _)) in x_sorted.iter().enumerate() {
+        x_ranks[*idx] = (rank + 1) as f64;
+    }
+
+    // 计算y的排名
+    let mut y_ranks = vec![0.0; pairs.len()];
+    let mut y_sorted: Vec<(usize, f64)> = pairs.iter().enumerate().map(|(i, (_, y))| (i, *y)).collect();
+    y_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (rank, (idx, _)) in y_sorted.iter().enumerate() {
+        y_ranks[*idx] = (rank + 1) as f64;
+    }
+
+    // 计算排名之间的Pearson相关系数
+    let n = pairs.len() as f64;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
+    let mut sum_y2 = 0.0;
+
+    for i in 0..pairs.len() {
+        let xi = x_ranks[i];
+        let yi = y_ranks[i];
+        sum_x += xi;
+        sum_y += yi;
+        sum_xy += xi * yi;
+        sum_x2 += xi * xi;
+        sum_y2 += yi * yi;
+    }
+
+    let numerator = n * sum_xy - sum_x * sum_y;
+    let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
+
+    if denominator == 0.0 {
+        Ok(f64::NAN)
+    } else {
+        Ok(numerator / denominator)
+    }
+}
+
+// 辅助函数：因子正交化（施密特正交化）
+fn orthogonalize_factors(
+    data: DataFrame,
+    factor_cols: Vec<String>,
+    prefix: &str,
+) -> PyResult<DataFrame> {
+    use crate::data::linear;
+    
+    if factor_cols.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("因子列表不能为空"));
+    }
+
+    let mut result = data;
+
+    // 第一个因子保持不变
+    let first_col = &factor_cols[0];
+    let first_orth = result.column(first_col)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", first_col, e)))?
+        .clone();
+    
+    let first_orth_name = format!("{}{}", prefix, first_col);
+    let first_orth_renamed = first_orth.with_name(PlSmallStr::from(first_orth_name.as_str()));
+    result = result.with_column(first_orth_renamed)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+        .clone();
+
+    // 逐个正交化后续因子
+    for i in 1..factor_cols.len() {
+        let current_col = &factor_cols[i];
+        
+        // 收集已正交化的因子作为自变量
+        let x_cols: Vec<String> = (0..i)
+            .map(|j| format!("{}{}", prefix, factor_cols[j]))
+            .collect();
+
+        // 对当前因子进行回归，取残差
+        let (regressed_df, _) = linear(
+            PyDataFrame(result.clone()),
+            x_cols,
+            current_col.as_str(),
+            Some("_pred"),
+            Some("_resid"),
+            false,
+        )?;
+
+        result = regressed_df.0;
+
+        // 将残差重命名为正交化后的因子
+        let resid_col = result.column("_resid")
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取残差列失败: {}", e)))?
+            .clone();
+
+        let orth_name = format!("{}{}", prefix, current_col);
+        let resid_renamed = resid_col.with_name(PlSmallStr::from(orth_name.as_str()));
+        result = result.with_column(resid_renamed)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+            .clone();
+
+        // 删除临时列
+        result = result.drop("_pred")
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除列失败: {}", e)))?;
+        result = result.drop("_resid")
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除列失败: {}", e)))?;
+    }
+
+    Ok(result)
+}
 
 #[pyclass]
 pub struct Factor;
@@ -20,1735 +183,2229 @@ impl Factor {
         Factor
     }
 
-    // ========================================================================
-    // 因子计算方法 (Factor Calculation Methods)
-    // ========================================================================
-
-    /// 动量因子（增强版）
-    /// 
-    /// 计算价格动量，支持多种计算方式
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格数据的DataFrame
-    /// - `price_col`: 价格列名（默认"close"）
-    /// - `period`: 回看周期（默认20天）
-    /// - `method`: 计算方法（默认"return"）
-    ///   - "return": 简单收益率 (current - past) / past
-    ///   - "log": 对数收益率 ln(current / past)
-    ///   - "residual": 残差动量（去除市场整体趋势）
-    ///   - "acceleration": 动量加速度（动量的变化率）
-    /// - `factor_col`: 因子列名（默认"momentum"）
-    /// 
-    /// # 返回
-    /// 包含动量因子列的DataFrame
-    /// 
-    /// # 示例
-    /// ```python
-    /// # 简单收益率动量（默认）
-    /// df = factor.momentum(df, period=20)
-    /// 
-    /// # 对数收益率动量（适合长周期）
-    /// df = factor.momentum(df, period=60, method="log")
-    /// 
-    /// # 动量加速度（捕捉趋势变化）
-    /// df = factor.momentum(df, period=20, method="acceleration")
-    /// ```
-    #[pyo3(signature = (df, price_col="close", period=20, method="return", factor_col="momentum"))]
-    pub fn momentum(&self, df: PyDataFrame, price_col: &str, period: usize, method: &str, factor_col: &str) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (df, numerator_col, denominator_col, factor_col=None, handle_zero="nan"))]
+    pub fn ratio(&self, df: PyDataFrame, numerator_col: &str, denominator_col: &str, 
+                 factor_col: Option<&str>, handle_zero: &str) -> PyResult<PyDataFrame> {
         let mut data: DataFrame = df.into();
         
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
+        let numerator = data.column(numerator_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取分子列失败: {}", e)))?
             .as_materialized_series()
             .clone();
         
-        let price_values = price.f64()
+        let denominator = data.column(denominator_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取分母列失败: {}", e)))?
+            .as_materialized_series()
+            .clone();
+        
+        let num_values = numerator.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分子列类型错误: {}", e)))?;
+        
+        let den_values = denominator.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分母列类型错误: {}", e)))?;
+        
+        let len = num_values.len();
+        let mut ratio_values = vec![f64::NAN; len];
+        
+        for i in 0..len {
+            if let (Some(num), Some(den)) = (num_values.get(i), den_values.get(i)) {
+                ratio_values[i] = match handle_zero {
+                    "nan" => if den != 0.0 { num / den } else { f64::NAN },
+                    "inf" => num / den,
+                    "skip" => if den != 0.0 { num / den } else { num },
+                    _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!("不支持的 handle_zero 参数: {}", handle_zero)
+                    ))
+                };
+            }
+        }
+        
+        let default_name = format!("{}_{}_ratio", numerator_col, denominator_col);
+        let col_name = factor_col.unwrap_or(&default_name);
+        let ratio_series = Series::new(col_name.into(), ratio_values);
+        data.with_column(ratio_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
+        
+        Ok(PyDataFrame(data))
+    }
+
+    #[pyo3(signature = (df, col1, col2, factor_col=None, normalize=false))]
+    pub fn diff(&self, df: PyDataFrame, col1: &str, col2: &str, 
+                factor_col: Option<&str>, normalize: bool) -> PyResult<PyDataFrame> {
+        let mut data: DataFrame = df.into();
+        
+        let series1 = data.column(col1)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取第一列失败: {}", e)))?
+            .as_materialized_series()
+            .clone();
+        
+        let series2 = data.column(col2)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取第二列失败: {}", e)))?
+            .as_materialized_series()
+            .clone();
+        
+        let values1 = series1.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("第一列类型错误: {}", e)))?;
+        
+        let values2 = series2.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("第二列类型错误: {}", e)))?;
+        
+        let len = values1.len();
+        let mut diff_values = vec![f64::NAN; len];
+        
+        for i in 0..len {
+            if let (Some(v1), Some(v2)) = (values1.get(i), values2.get(i)) {
+                diff_values[i] = if normalize {
+                    if v2 != 0.0 { (v1 - v2) / v2 } else { f64::NAN }
+                } else {
+                    v1 - v2
+                };
+            }
+        }
+        
+        let default_name = format!("{}_{}_diff", col1, col2);
+        let col_name = factor_col.unwrap_or(&default_name);
+        let diff_series = Series::new(col_name.into(), diff_values);
+        data.with_column(diff_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
+        
+        Ok(PyDataFrame(data))
+    }
+
+    /// 加权因子计算
+    /// 
+    /// 计算加权平均值，常用于市值加权、成交量加权等场景
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `value_col` - 数值列名
+    /// * `weight_col` - 权重列名
+    /// * `factor_col` - 输出因子列名（可选）
+    /// * `group_cols` - 分组列名列表（可选，用于分组加权）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含加权因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算市值加权PE
+    /// df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe")
+    /// 
+    /// # 按行业分组计算市值加权PE
+    /// df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe", ["industry"])
+    /// ```
+    pub fn weighted(
+        &self,
+        df: PyDataFrame,
+        value_col: &str,
+        weight_col: &str,
+        factor_col: Option<&str>,
+        group_cols: Option<Vec<String>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+
+        let default_name = format!("{}_{}_weighted", value_col, weight_col);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        // 获取数值列和权重列
+        let value_series = data.column(value_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", value_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+        let weight_series = data.column(weight_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", weight_col, e)))?
+            .cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+        let values = value_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+        let weights = weight_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取权重失败: {}", e)))?;
+
+        let len = values.len();
+        let mut weighted_values = vec![0.0; len];
+
+        if let Some(_groups) = group_cols {
+            // TODO: 实现分组加权计算（需要更复杂的逻辑）
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("分组加权计算暂未实现"));
+        } else {
+            // 全局加权计算
+            let mut sum_weighted = 0.0;
+            let mut sum_weight = 0.0;
+
+            for i in 0..len {
+                if let (Some(v), Some(w)) = (values.get(i), weights.get(i)) {
+                    if !v.is_nan() && !w.is_nan() {
+                        sum_weighted += v * w;
+                        sum_weight += w;
+                    }
+                }
+            }
+
+            let weighted_value = if sum_weight > 0.0 {
+                sum_weighted / sum_weight
+            } else {
+                f64::NAN
+            };
+
+            // 所有行使用相同的加权值
+            for i in 0..len {
+                weighted_values[i] = weighted_value;
+            }
+        }
+
+        let weighted_series = Series::new(col_name.into(), weighted_values);
+        data.with_column(weighted_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
         
-        let len = price_values.len();
-        let mut momentum = vec![f64::NAN; len];
-        
+        Ok(PyDataFrame(data))
+    }
+
+    /// 标准化因子
+    /// 
+    /// 对因子进行标准化处理，支持多种标准化方法
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 需要标准化的列名
+    /// * `method` - 标准化方法: "zscore"(默认), "minmax", "rank", "quantile"
+    /// * `factor_col` - 输出因子列名（可选）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含标准化因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # Z-Score标准化
+    /// df = factor.normalize(df, "pe_ratio", "zscore", "pe_normalized")
+    /// 
+    /// # 最小-最大标准化
+    /// df = factor.normalize(df, "pb_ratio", "minmax", "pb_normalized")
+    /// ```
+    pub fn normalize(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        method: Option<&str>,
+        factor_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+        let method = method.unwrap_or("zscore");
+
+        let default_name = format!("{}_{}_normalized", col, method);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        // 获取列数据
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+        let values = series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let len = values.len();
+        let mut normalized_values = vec![0.0; len];
+
         match method {
-            "return" => {
-                // 简单收益率
-                for i in period..len {
-                    if let (Some(current), Some(past)) = (price_values.get(i), price_values.get(i - period)) {
-                        if past != 0.0 {
-                            momentum[i] = (current - past) / past;
+            "zscore" => {
+                // 计算均值和标准差
+                let mut sum = 0.0;
+                let mut count = 0;
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if !v.is_nan() {
+                            sum += v;
+                            count += 1;
+                        }
+                    }
+                }
+                let mean = if count > 0 { sum / count as f64 } else { 0.0 };
+
+                let mut sum_sq = 0.0;
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if !v.is_nan() {
+                            sum_sq += (v - mean).powi(2);
+                        }
+                    }
+                }
+                let std = if count > 1 { (sum_sq / (count - 1) as f64).sqrt() } else { 1.0 };
+
+                // 标准化
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        normalized_values[i] = if !v.is_nan() && std > 0.0 {
+                            (v - mean) / std
+                        } else {
+                            f64::NAN
+                        };
+                    }
+                }
+            },
+            "minmax" => {
+                // 计算最小值和最大值
+                let mut min_val = f64::INFINITY;
+                let mut max_val = f64::NEG_INFINITY;
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if !v.is_nan() {
+                            if v < min_val { min_val = v; }
+                            if v > max_val { max_val = v; }
+                        }
+                    }
+                }
+
+                let range = max_val - min_val;
+
+                // 标准化
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        normalized_values[i] = if !v.is_nan() && range > 0.0 {
+                            (v - min_val) / range
+                        } else {
+                            f64::NAN
+                        };
+                    }
+                }
+            },
+            "rank" => {
+                // 转换为排名（1到N）
+                let mut pairs: Vec<(usize, f64)> = Vec::new();
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if !v.is_nan() {
+                            pairs.push((i, v));
+                        }
+                    }
+                }
+                pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                for (rank, (idx, _)) in pairs.iter().enumerate() {
+                    normalized_values[*idx] = (rank + 1) as f64;
+                }
+
+                // 将NaN保持为NaN
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if v.is_nan() {
+                            normalized_values[i] = f64::NAN;
                         }
                     }
                 }
             },
-            "log" => {
-                // 对数收益率
-                for i in period..len {
-                    if let (Some(current), Some(past)) = (price_values.get(i), price_values.get(i - period)) {
-                        if past > 0.0 && current > 0.0 {
-                            momentum[i] = (current / past).ln();
+            "quantile" => {
+                // 转换为分位数（0到1）
+                let mut pairs: Vec<(usize, f64)> = Vec::new();
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if !v.is_nan() {
+                            pairs.push((i, v));
                         }
                     }
                 }
-            },
-            "residual" => {
-                // 残差动量：当前动量 - 平均动量（去除市场整体趋势）
-                let mut raw_momentum = vec![f64::NAN; len];
-                for i in period..len {
-                    if let (Some(current), Some(past)) = (price_values.get(i), price_values.get(i - period)) {
-                        if past != 0.0 {
-                            raw_momentum[i] = (current - past) / past;
-                        }
-                    }
+                pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let count = pairs.len();
+                for (rank, (idx, _)) in pairs.iter().enumerate() {
+                    normalized_values[*idx] = if count > 1 {
+                        rank as f64 / (count - 1) as f64
+                    } else {
+                        0.5
+                    };
                 }
-                
-                // 计算平均动量
-                let valid_momentum: Vec<f64> = raw_momentum.iter()
-                    .filter(|&&x| !x.is_nan())
-                    .copied()
-                    .collect();
-                
-                if !valid_momentum.is_empty() {
-                    let avg_momentum = valid_momentum.iter().sum::<f64>() / valid_momentum.len() as f64;
-                    
-                    // 残差 = 实际动量 - 平均动量
-                    for i in period..len {
-                        if !raw_momentum[i].is_nan() {
-                            momentum[i] = raw_momentum[i] - avg_momentum;
-                        }
-                    }
-                }
-            },
-            "acceleration" => {
-                // 动量加速度：近期动量 - 远期动量
-                let short_period = period / 2;
-                if short_period < 1 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("周期太短，无法计算加速度"));
-                }
-                
-                for i in period..len {
-                    // 近期动量（最近short_period天）
-                    if let (Some(current), Some(mid)) = (price_values.get(i), price_values.get(i - short_period)) {
-                        if mid != 0.0 {
-                            let short_mom = (current - mid) / mid;
-                            
-                            // 远期动量（period到short_period之间）
-                            if let Some(past) = price_values.get(i - period) {
-                                if past != 0.0 {
-                                    let long_mom = (mid - past) / past;
-                                    // 加速度 = 近期动量 - 远期动量
-                                    momentum[i] = short_mom - long_mom;
-                                }
-                            }
+
+                // 将NaN保持为NaN
+                for i in 0..len {
+                    if let Some(v) = values.get(i) {
+                        if v.is_nan() {
+                            normalized_values[i] = f64::NAN;
                         }
                     }
                 }
             },
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    format!("未知的方法: {}，支持的方法：return, log, residual, acceleration", method)
+                    format!("不支持的标准化方法: {}", method)
                 ));
             }
         }
-        
-        data.with_column(Series::new(PlSmallStr::from_str(factor_col), momentum))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
+
+        let normalized_series = Series::new(col_name.into(), normalized_values);
+        data.with_column(normalized_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
         
         Ok(PyDataFrame(data))
     }
 
-    /// 反转因子
+    /// 排名因子
     /// 
-    /// 短期反转效应：过去短期表现差的股票未来可能反转
+    /// 对因子进行排名，支持分组排名和升降序
     /// 
-    /// # 参数
-    /// - `df`: 包含价格数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `period`: 回看周期（默认5天）
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 需要排名的列名
+    /// * `factor_col` - 输出因子列名（可选）
+    /// * `ascending` - 是否升序排名（True: 小值排名低, False: 大值排名低）
+    /// * `pct` - 是否返回百分比排名（0-1之间）
     /// 
-    /// # 返回
-    /// 包含reversal因子列的DataFrame（取负号，表现差的得分高）
-    #[pyo3(signature = (df, price_col="close", period=5))]
-    pub fn reversal(&self, df: PyDataFrame, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let price_values = price.f64()
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含排名因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 按PE从小到大排名
+    /// df = factor.rank(df, "pe_ratio", "pe_rank", True, False)
+    /// 
+    /// # 按市值从大到小排名（百分比）
+    /// df = factor.rank(df, "market_cap", "cap_rank", False, True)
+    /// ```
+    pub fn rank(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        factor_col: Option<&str>,
+        ascending: Option<bool>,
+        pct: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+        let ascending = ascending.unwrap_or(true);
+        let pct = pct.unwrap_or(false);
+
+        let default_name = format!("{}_rank", col);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        // 获取列数据
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut reversal = vec![f64::NAN; len];
-        
-        for i in period..len {
-            if let (Some(current), Some(past)) = (price_values.get(i), price_values.get(i - period)) {
-                if past != 0.0 {
-                    // 取负号：短期跌幅大的因子值高
-                    reversal[i] = -(current - past) / past;
+
+        let values = series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let len = values.len();
+        let mut rank_values = vec![f64::NAN; len];
+
+        // 收集非NaN值和索引
+        let mut pairs: Vec<(usize, f64)> = Vec::new();
+        for i in 0..len {
+            if let Some(v) = values.get(i) {
+                if !v.is_nan() {
+                    pairs.push((i, v));
                 }
             }
         }
+
+        // 排序
+        if ascending {
+            pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // 分配排名
+        let count = pairs.len();
+        for (rank, (idx, _)) in pairs.iter().enumerate() {
+            rank_values[*idx] = if pct {
+                if count > 1 {
+                    rank as f64 / (count - 1) as f64
+                } else {
+                    0.5
+                }
+            } else {
+                (rank + 1) as f64
+            };
+        }
+
+        let rank_series = Series::new(col_name.into(), rank_values);
+        data.with_column(rank_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
         
-        data.with_column(Series::new(PlSmallStr::from_str("reversal"), reversal))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
+        Ok(PyDataFrame(data))
+    }
+
+    /// 移动平均因子
+    /// 
+    /// 计算滑动窗口的移动平均值
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `window` - 窗口大小
+    /// * `factor_col` - 输出因子列名（可选）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含移动平均因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算20日移动平均
+    /// df = factor.moving_average(df, "close", 20, "ma20")
+    /// ```
+    /// 移动平均因子
+    /// 
+    /// 计算简单移动平均
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `window` - 窗口大小
+    /// * `factor_col` - 输出因子列名（可选）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含移动平均因子的数据框
+    pub fn moving_average(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        window: usize,
+        factor_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        use crate::talib::calculate_sma;
+        
+        let mut data = df.0;
+
+        let default_name = format!("{}_ma{}", col, window);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .as_materialized_series()
+            .clone();
+
+        // 使用talib的SMA计算
+        let ma_series = calculate_sma(&series, window)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("计算MA失败: {}", e)))?
+            .with_name(PlSmallStr::from(col_name));
+
+        data = data.with_column(ma_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+            .clone();
+        
+        Ok(PyDataFrame(data))
+    }
+
+    /// 动量因子
+    /// 
+    /// 计算收益率动量（当前值相对于N期前的变化率）
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `period` - 回看期数
+    /// * `factor_col` - 输出因子列名（可选）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含动量因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算20日动量
+    /// df = factor.momentum(df, "close", 20, "mom20")
+    /// ```
+    pub fn momentum(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        period: usize,
+        factor_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+
+        let default_name = format!("{}_mom{}", col, period);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+        let values = series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let len = values.len();
+        let mut mom_values = vec![f64::NAN; len];
+
+        for i in period..len {
+            if let (Some(current), Some(previous)) = (values.get(i), values.get(i - period)) {
+                if !current.is_nan() && !previous.is_nan() && previous != 0.0 {
+                    mom_values[i] = (current - previous) / previous;
+                }
+            }
+        }
+
+        let mom_series = Series::new(col_name.into(), mom_values);
+        data.with_column(mom_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
         
         Ok(PyDataFrame(data))
     }
 
     /// 波动率因子
     /// 
-    /// 计算过去N天的价格波动率（标准差）
+    /// 计算滑动窗口的收益率标准差
     /// 
-    /// # 参数
-    /// - `df`: 包含收益率数据的DataFrame
-    /// - `return_col`: 收益率列名（如果为None则从price_col计算）
-    /// - `price_col`: 价格列名（用于计算收益率）
-    /// - `period`: 回看周期（默认20天）
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `window` - 窗口大小
+    /// * `factor_col` - 输出因子列名（可选）
     /// 
-    /// # 返回
-    /// 包含volatility因子列的DataFrame
-    #[pyo3(signature = (df, return_col=None, price_col="close", period=20))]
-    pub fn volatility(&self, df: PyDataFrame, return_col: Option<&str>, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        // 获取或计算收益率
-        let returns = if let Some(ret_col) = return_col {
-            data.column(ret_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-                .as_materialized_series()
-                .clone()
-        } else {
-            // 从价格计算收益率
-            let price = data.column(price_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-                .as_materialized_series()
-                .clone();
-            
-            let price_values = price.f64()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-            
-            let len = price_values.len();
-            let mut returns_vec = vec![f64::NAN; len];
-            
-            for i in 1..len {
-                if let (Some(current), Some(prev)) = (price_values.get(i), price_values.get(i - 1)) {
-                    if prev != 0.0 {
-                        returns_vec[i] = (current - prev) / prev;
-                    }
-                }
-            }
-            
-            Series::new(PlSmallStr::from_str("returns"), returns_vec)
-        };
-        
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = return_values.len();
-        let mut volatility = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            // 计算均值
-            for j in (i - period)..i {
-                if let Some(ret) = return_values.get(j) {
-                    if !ret.is_nan() {
-                        sum += ret;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 1 {
-                let mean = sum / count as f64;
-                
-                // 计算标准差
-                let mut variance = 0.0;
-                for j in (i - period)..i {
-                    if let Some(ret) = return_values.get(j) {
-                        if !ret.is_nan() {
-                            variance += (ret - mean).powi(2);
-                        }
-                    }
-                }
-                
-                volatility[i] = (variance / count as f64).sqrt();
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("volatility"), volatility))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含波动率因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算20日波动率
+    /// df = factor.volatility(df, "returns", 20, "vol20")
+    /// ```
+    /// 波动率因子
+    /// 
+    /// 计算滑动窗口的标准差
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `window` - 窗口大小
+    /// * `factor_col` - 输出因子列名（可选）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含波动率因子的数据框
+    pub fn volatility(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        window: usize,
+        factor_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
 
-    /// 成交量因子
-    /// 
-    /// 相对成交量：当前成交量 / 过去N天平均成交量
-    /// 
-    /// # 参数
-    /// - `df`: 包含成交量数据的DataFrame
-    /// - `volume_col`: 成交量列名（默认"volume"）
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含volume_factor因子列的DataFrame
-    #[pyo3(signature = (df, volume_col="volume", period=20))]
-    pub fn volume_factor(&self, df: PyDataFrame, volume_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let volume = data.column(volume_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取成交量列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let volume_values = volume.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = volume_values.len();
-        let mut volume_factor = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            for j in (i - period)..i {
-                if let Some(vol) = volume_values.get(j) {
-                    if !vol.is_nan() && vol > 0.0 {
-                        sum += vol;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 0 {
-                if let Some(current_vol) = volume_values.get(i) {
-                    let avg_volume = sum / count as f64;
-                    if avg_volume > 0.0 {
-                        volume_factor[i] = current_vol / avg_volume;
-                    }
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("volume_factor"), volume_factor))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
+        let default_name = format!("{}_vol{}", col, window);
+        let col_name = factor_col.unwrap_or(&default_name);
+        let column_name = col.to_string();
 
-    /// 量价相关性因子
-    /// 
-    /// 计算价格变动与成交量的相关性
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格和成交量数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `volume_col`: 成交量列名
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含price_volume_corr因子列的DataFrame
-    #[pyo3(signature = (df, price_col="close", volume_col="volume", period=20))]
-    pub fn price_volume_corr(&self, df: PyDataFrame, price_col: &str, volume_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
+        // 使用Polars的rolling_std计算波动率
+        let vol_series = data.clone().lazy()
+            .select([
+                polars::prelude::col(&column_name)
+                    .cast(DataType::Float64)
+                    .rolling_std(RollingOptionsFixedWindow {
+                        window_size: window,
+                        min_periods: window,
+                        ..Default::default()
+                    })
+                    .alias(col_name)
+            ])
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("计算波动率失败: {}", e)))?
+            .column(col_name)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取列失败: {}", e)))?
             .clone();
-        
-        let volume = data.column(volume_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取成交量列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let price_values = price.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let volume_values = volume.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut corr_factor = vec![f64::NAN; len];
-        
-        for i in period..len {
-            // 计算价格和成交量的均值
-            let mut price_sum = 0.0;
-            let mut volume_sum = 0.0;
-            let mut count = 0;
-            
-            for j in (i - period)..i {
-                if let (Some(p), Some(v)) = (price_values.get(j), volume_values.get(j)) {
-                    if !p.is_nan() && !v.is_nan() {
-                        price_sum += p;
-                        volume_sum += v;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 1 {
-                let price_mean = price_sum / count as f64;
-                let volume_mean = volume_sum / count as f64;
-                
-                // 计算协方差和标准差
-                let mut cov = 0.0;
-                let mut price_var = 0.0;
-                let mut volume_var = 0.0;
-                
-                for j in (i - period)..i {
-                    if let (Some(p), Some(v)) = (price_values.get(j), volume_values.get(j)) {
-                        if !p.is_nan() && !v.is_nan() {
-                            let price_diff = p - price_mean;
-                            let volume_diff = v - volume_mean;
-                            cov += price_diff * volume_diff;
-                            price_var += price_diff * price_diff;
-                            volume_var += volume_diff * volume_diff;
-                        }
-                    }
-                }
-                
-                let price_std = price_var.sqrt();
-                let volume_std = volume_var.sqrt();
-                
-                if price_std > 0.0 && volume_std > 0.0 {
-                    corr_factor[i] = cov / (price_std * volume_std);
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("price_volume_corr"), corr_factor))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
 
-    /// 价格加速度因子
-    /// 
-    /// 测量价格变化的加速度（二阶导数）
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `period`: 回看周期（默认10天）
-    /// 
-    /// # 返回
-    /// 包含price_acceleration因子列的DataFrame
-    #[pyo3(signature = (df, price_col="close", period=10))]
-    pub fn price_acceleration(&self, df: PyDataFrame, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
+        data = data.with_column(vol_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
             .clone();
-        
-        let price_values = price.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut acceleration = vec![f64::NAN; len];
-        
-        // 需要至少2*period的数据
-        for i in (2 * period)..len {
-            if let (Some(p_now), Some(p_mid), Some(p_past)) = (
-                price_values.get(i),
-                price_values.get(i - period),
-                price_values.get(i - 2 * period),
-            ) {
-                if p_mid != 0.0 && p_past != 0.0 {
-                    // 计算两段收益率
-                    let ret1 = (p_mid - p_past) / p_past;
-                    let ret2 = (p_now - p_mid) / p_mid;
-                    // 加速度 = 收益率的变化
-                    acceleration[i] = ret2 - ret1;
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("price_acceleration"), acceleration))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
         
         Ok(PyDataFrame(data))
     }
 
     /// 偏度因子
     /// 
-    /// 收益率分布的偏度，正偏表示右尾厚，负偏表示左尾厚
+    /// 计算滑动窗口的收益率分布偏度
     /// 
-    /// # 参数
-    /// - `df`: 包含价格或收益率数据的DataFrame
-    /// - `return_col`: 收益率列名（如果为None则从price_col计算）
-    /// - `price_col`: 价格列名
-    /// - `period`: 回看周期（默认20天）
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 列名
+    /// * `window` - 窗口大小
+    /// * `factor_col` - 输出因子列名（可选）
     /// 
-    /// # 返回
-    /// 包含skewness因子列的DataFrame
-    #[pyo3(signature = (df, return_col=None, price_col="close", period=20))]
-    pub fn skewness(&self, df: PyDataFrame, return_col: Option<&str>, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        // 获取或计算收益率
-        let returns = if let Some(ret_col) = return_col {
-            data.column(ret_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-                .as_materialized_series()
-                .clone()
-        } else {
-            let price = data.column(price_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-                .as_materialized_series()
-                .clone();
-            
-            let price_values = price.f64()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-            
-            let len = price_values.len();
-            let mut returns_vec = vec![f64::NAN; len];
-            
-            for i in 1..len {
-                if let (Some(current), Some(prev)) = (price_values.get(i), price_values.get(i - 1)) {
-                    if prev != 0.0 {
-                        returns_vec[i] = (current - prev) / prev;
-                    }
-                }
-            }
-            
-            Series::new(PlSmallStr::from_str("returns"), returns_vec)
-        };
-        
-        let return_values = returns.f64()
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含偏度因子的数据框
+    pub fn skewness(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        window: usize,
+        factor_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+
+        let default_name = format!("{}_skew{}", col, window);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        // 使用Polars的rolling计算偏度（手动计算，因为Polars可能没有内置rolling_skew）
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = return_values.len();
-        let mut skewness = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            // 计算均值
-            for j in (i - period)..i {
-                if let Some(ret) = return_values.get(j) {
-                    if !ret.is_nan() {
-                        sum += ret;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 2 {
-                let mean = sum / count as f64;
+
+        let values = series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let len = values.len();
+        let mut skew_values = vec![f64::NAN; len];
+
+        for i in 0..len {
+            if i + 1 >= window {
+                let mut vals = Vec::new();
                 
-                // 计算标准差和偏度
-                let mut m2 = 0.0;
-                let mut m3 = 0.0;
-                
-                for j in (i - period)..i {
-                    if let Some(ret) = return_values.get(j) {
-                        if !ret.is_nan() {
-                            let diff = ret - mean;
-                            m2 += diff * diff;
-                            m3 += diff * diff * diff;
+                // 收集窗口内的有效值
+                for j in (i + 1 - window)..=i {
+                    if let Some(v) = values.get(j) {
+                        if !v.is_nan() {
+                            vals.push(v);
                         }
                     }
                 }
                 
-                let variance = m2 / count as f64;
-                let std = variance.sqrt();
-                
-                if std > 0.0 {
-                    // 偏度 = E[(X-μ)³] / σ³
-                    skewness[i] = (m3 / count as f64) / (std * std * std);
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("skewness"), skewness))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// 峰度因子
-    /// 
-    /// 收益率分布的峰度，衡量尾部厚度
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格或收益率数据的DataFrame
-    /// - `return_col`: 收益率列名（如果为None则从price_col计算）
-    /// - `price_col`: 价格列名
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含kurtosis因子列的DataFrame（超额峰度，正态分布为0）
-    #[pyo3(signature = (df, return_col=None, price_col="close", period=20))]
-    pub fn kurtosis(&self, df: PyDataFrame, return_col: Option<&str>, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        // 获取或计算收益率
-        let returns = if let Some(ret_col) = return_col {
-            data.column(ret_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-                .as_materialized_series()
-                .clone()
-        } else {
-            let price = data.column(price_col)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-                .as_materialized_series()
-                .clone();
-            
-            let price_values = price.f64()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-            
-            let len = price_values.len();
-            let mut returns_vec = vec![f64::NAN; len];
-            
-            for i in 1..len {
-                if let (Some(current), Some(prev)) = (price_values.get(i), price_values.get(i - 1)) {
-                    if prev != 0.0 {
-                        returns_vec[i] = (current - prev) / prev;
-                    }
-                }
-            }
-            
-            Series::new(PlSmallStr::from_str("returns"), returns_vec)
-        };
-        
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = return_values.len();
-        let mut kurtosis = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            // 计算均值
-            for j in (i - period)..i {
-                if let Some(ret) = return_values.get(j) {
-                    if !ret.is_nan() {
-                        sum += ret;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 3 {
-                let mean = sum / count as f64;
-                
-                // 计算标准差和峰度
-                let mut m2 = 0.0;
-                let mut m4 = 0.0;
-                
-                for j in (i - period)..i {
-                    if let Some(ret) = return_values.get(j) {
-                        if !ret.is_nan() {
-                            let diff = ret - mean;
-                            let diff2 = diff * diff;
-                            m2 += diff2;
-                            m4 += diff2 * diff2;
-                        }
-                    }
-                }
-                
-                let variance = m2 / count as f64;
-                
-                if variance > 0.0 {
-                    // 超额峰度 = E[(X-μ)⁴] / σ⁴ - 3
-                    kurtosis[i] = (m4 / count as f64) / (variance * variance) - 3.0;
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("kurtosis"), kurtosis))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// 最大回撤因子
-    /// 
-    /// 计算过去N天的最大回撤
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含max_drawdown因子列的DataFrame（负值）
-    #[pyo3(signature = (df, price_col="close", period=20))]
-    pub fn max_drawdown(&self, df: PyDataFrame, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let price_values = price.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut max_dd = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut max_price = f64::NEG_INFINITY;
-            let mut max_drawdown = 0.0;
-            
-            for j in (i - period)..=i {
-                if let Some(p) = price_values.get(j) {
-                    if !p.is_nan() {
-                        if p > max_price {
-                            max_price = p;
-                        }
-                        
-                        if max_price > 0.0 {
-                            let drawdown = (p - max_price) / max_price;
-                            if drawdown < max_drawdown {
-                                max_drawdown = drawdown;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            max_dd[i] = max_drawdown;
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("max_drawdown"), max_dd))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// 换手率因子
-    /// 
-    /// 计算相对换手率：当前换手率 / 历史平均换手率
-    /// 
-    /// # 参数
-    /// - `df`: 包含换手率数据的DataFrame
-    /// - `turnover_col`: 换手率列名（默认"turnover"）
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含turnover_factor因子列的DataFrame
-    #[pyo3(signature = (df, turnover_col="turnover", period=20))]
-    pub fn turnover_factor(&self, df: PyDataFrame, turnover_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let turnover = data.column(turnover_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取换手率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let turnover_values = turnover.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = turnover_values.len();
-        let mut turnover_factor = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            for j in (i - period)..i {
-                if let Some(to) = turnover_values.get(j) {
-                    if !to.is_nan() && to > 0.0 {
-                        sum += to;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 0 {
-                if let Some(current_to) = turnover_values.get(i) {
-                    let avg_turnover = sum / count as f64;
-                    if avg_turnover > 0.0 {
-                        turnover_factor[i] = current_to / avg_turnover;
-                    }
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("turnover_factor"), turnover_factor))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// 振幅因子
-    /// 
-    /// 计算相对振幅：当前振幅 / 历史平均振幅
-    /// 
-    /// # 参数
-    /// - `df`: 包含最高价和最低价的DataFrame
-    /// - `high_col`: 最高价列名（默认"high"）
-    /// - `low_col`: 最低价列名（默认"low"）
-    /// - `close_col`: 收盘价列名（默认"close"）
-    /// - `period`: 回看周期（默认20天）
-    /// 
-    /// # 返回
-    /// 包含amplitude_factor因子列的DataFrame
-    #[pyo3(signature = (df, high_col="high", low_col="low", close_col="close", period=20))]
-    pub fn amplitude_factor(&self, df: PyDataFrame, high_col: &str, low_col: &str, close_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let high = data.column(high_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取最高价列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let low = data.column(low_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取最低价列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let close = data.column(close_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收盘价列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let high_values = high.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let low_values = low.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let close_values = close.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = high_values.len();
-        let mut amplitude_factor = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut sum_amp = 0.0;
-            let mut count = 0;
-            
-            // 计算历史平均振幅
-            for j in (i - period)..i {
-                if let (Some(h), Some(l), Some(c)) = (high_values.get(j), low_values.get(j), close_values.get(j)) {
-                    if !h.is_nan() && !l.is_nan() && !c.is_nan() && c > 0.0 {
-                        let amp = (h - l) / c;
-                        sum_amp += amp;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count > 0 {
-                if let (Some(h), Some(l), Some(c)) = (high_values.get(i), low_values.get(i), close_values.get(i)) {
-                    if !h.is_nan() && !l.is_nan() && !c.is_nan() && c > 0.0 {
-                        let current_amp = (h - l) / c;
-                        let avg_amp = sum_amp / count as f64;
-                        if avg_amp > 0.0 {
-                            amplitude_factor[i] = current_amp / avg_amp;
-                        }
-                    }
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("amplitude_factor"), amplitude_factor))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// 量价背离因子
-    /// 
-    /// 价格上涨但成交量下降（或反之）的程度
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格和成交量数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `volume_col`: 成交量列名
-    /// - `period`: 回看周期（默认5天）
-    /// 
-    /// # 返回
-    /// 包含price_volume_divergence因子列的DataFrame
-    /// 正值表示价升量跌（看跌背离），负值表示价跌量升（看涨背离）
-    #[pyo3(signature = (df, price_col="close", volume_col="volume", period=5))]
-    pub fn price_volume_divergence(&self, df: PyDataFrame, price_col: &str, volume_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let volume = data.column(volume_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取成交量列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let price_values = price.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let volume_values = volume.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut divergence = vec![f64::NAN; len];
-        
-        for i in period..len {
-            if let (Some(p_now), Some(p_past), Some(v_now), Some(v_past)) = (
-                price_values.get(i),
-                price_values.get(i - period),
-                volume_values.get(i),
-                volume_values.get(i - period),
-            ) {
-                if p_past > 0.0 && v_past > 0.0 {
-                    let price_change = (p_now - p_past) / p_past;
-                    let volume_change = (v_now - v_past) / v_past;
+                if vals.len() > 2 {
+                    let n = vals.len() as f64;
+                    let mean: f64 = vals.iter().sum::<f64>() / n;
+                    let m2: f64 = vals.iter().map(|&v| (v - mean).powi(2)).sum::<f64>();
+                    let m3: f64 = vals.iter().map(|&v| (v - mean).powi(3)).sum::<f64>();
                     
-                    // 背离度 = 价格变化 - 成交量变化
-                    // 正值表示价升量跌，负值表示价跌量升
-                    divergence[i] = price_change - volume_change;
-                }
-            }
-        }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("price_volume_divergence"), divergence))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
-        
-        Ok(PyDataFrame(data))
-    }
-
-    /// RSI相对强弱因子
-    /// 
-    /// 基于RSI指标的因子，标准化到[-1, 1]区间
-    /// 
-    /// # 参数
-    /// - `df`: 包含价格数据的DataFrame
-    /// - `price_col`: 价格列名
-    /// - `period`: RSI周期（默认14天）
-    /// 
-    /// # 返回
-    /// 包含rsi_factor因子列的DataFrame
-    #[pyo3(signature = (df, price_col="close", period=14))]
-    pub fn rsi_factor(&self, df: PyDataFrame, price_col: &str, period: usize) -> PyResult<PyDataFrame> {
-        let mut data: DataFrame = df.into();
-        
-        let price = data.column(price_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取价格列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let price_values = price.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = price_values.len();
-        let mut rsi_factor = vec![f64::NAN; len];
-        
-        for i in period..len {
-            let mut gain_sum = 0.0;
-            let mut loss_sum = 0.0;
-            
-            for j in (i - period + 1)..=i {
-                if let (Some(current), Some(prev)) = (price_values.get(j), price_values.get(j - 1)) {
-                    if !current.is_nan() && !prev.is_nan() {
-                        let change = current - prev;
-                        if change > 0.0 {
-                            gain_sum += change;
-                        } else {
-                            loss_sum += -change;
-                        }
+                    let variance = m2 / n;
+                    let std = variance.sqrt();
+                    
+                    if std > 0.0 {
+                        skew_values[i] = (m3 / n) / std.powi(3);
                     }
                 }
             }
-            
-            let avg_gain = gain_sum / period as f64;
-            let avg_loss = loss_sum / period as f64;
-            
-            if avg_loss > 0.0 {
-                let rs = avg_gain / avg_loss;
-                let rsi = 100.0 - (100.0 / (1.0 + rs));
-                // 标准化到[-1, 1]: (RSI - 50) / 50
-                rsi_factor[i] = (rsi - 50.0) / 50.0;
-            } else if avg_gain > 0.0 {
-                rsi_factor[i] = 1.0;
-            } else {
-                rsi_factor[i] = 0.0;
-            }
         }
-        
-        data.with_column(Series::new(PlSmallStr::from_str("rsi_factor"), rsi_factor))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加因子列失败: {}", e)))?;
+
+        let skew_series = Series::new(PlSmallStr::from(col_name), skew_values);
+        data = data.with_column(skew_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+            .clone();
         
         Ok(PyDataFrame(data))
     }
 
-    // ========================================================================
-    // 因子评估方法 (Factor Evaluation Methods)
-    // ========================================================================
-    // 
-    // 设计理念：约定优于配置
-    // 
-    // 使用方式：
-    // 1. 计算因子时自动添加到DataFrame: df = factor.momentum(df, "close", 20)
-    // 2. 添加未来收益: df = factor.return(df, "close", period=1)
-    // 3. 评估时使用默认列名: ic = factor.ic(df)  # 默认使用最后一个因子列
-    //
-    // 或者显式指定：
-    //    ic = factor.ic(df, factor_col="momentum", return_col="future_return")
-    // ========================================================================
-
-    /// IC值（信息系数）
+    /// 相对强弱因子
     /// 
-    /// IC = 因子值与未来收益率的Pearson相关系数
-    /// 衡量因子对未来收益的线性预测能力
+    /// 计算某列相对于基准列的相对强弱（比值或差值）
     /// 
-    /// # 使用流程
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `col` - 目标列名
+    /// * `benchmark_col` - 基准列名
+    /// * `factor_col` - 输出因子列名（可选）
+    /// * `method` - 计算方法: "ratio"(比值), "diff"(差值)
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含相对强弱因子的数据框
+    /// 
+    /// # Example
     /// ```python
-    /// # 方式1: 使用默认列名（最简洁）
-    /// df = factor.momentum(df, "close", period=20)      # 生成 "momentum" 列
-    /// df = factor.return(df, "close", period=1)         # 生成 "future_return" 列
-    /// ic = factor.ic(df, "momentum", "future_return")   # 显式指定列名
-    /// 
-    /// # 方式2: 批量评估多个因子
-    /// for col in ["momentum", "volatility", "rsi_factor"]:
-    ///     ic = factor.ic(df, col, "future_return")
-    ///     print(f"{col}: IC={ic:.4f}")
+    /// # 计算股票相对于市场的相对强弱
+    /// df = factor.relative_strength(df, "stock_return", "market_return", "rs", "ratio")
     /// ```
-    /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame
-    /// - `factor_col`: 因子列名（必需，因为可能有多个因子）
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// 
-    /// # 返回
-    /// IC值（相关系数，范围[-1, 1]）
-    /// 
-    /// # 评价标准
-    /// - |IC| > 0.03: 因子有效
-    /// - |IC| > 0.05: 因子较强
-    /// - |IC| > 0.08: 因子很强
-    #[pyo3(signature = (df, factor_col, return_col="future_return"))]
-    pub fn ic(&self, df: PyDataFrame, factor_col: &str, return_col: &str) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
+    pub fn relative_strength(
+        &self,
+        df: PyDataFrame,
+        col: &str,
+        benchmark_col: &str,
+        factor_col: Option<&str>,
+        method: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+        let method = method.unwrap_or("ratio");
+
+        let default_name = format!("{}_{}_rs", col, benchmark_col);
+        let col_name = factor_col.unwrap_or(&default_name);
+
+        let series = data.column(col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
+
+        let benchmark_series = data.column(benchmark_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", benchmark_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+        let values = series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+        let benchmark_values = benchmark_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let len = values.len();
+        let mut rs_values = vec![f64::NAN; len];
+
+        for i in 0..len {
+            if let (Some(v), Some(b)) = (values.get(i), benchmark_values.get(i)) {
+                if !v.is_nan() && !b.is_nan() {
+                    rs_values[i] = match method {
+                        "ratio" => if b != 0.0 { v / b } else { f64::NAN },
+                        "diff" => v - b,
+                        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            format!("不支持的方法: {}", method)
+                        ))
+                    };
+                }
+            }
+        }
+
+        let rs_series = Series::new(col_name.into(), rs_values);
+        data.with_column(rs_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?;
         
-        // 计算均值
-        let mut factor_sum = 0.0;
-        let mut return_sum = 0.0;
+        Ok(PyDataFrame(data))
+    }
+
+    /// IC值计算（信息系数）
+    /// 
+    /// 计算因子值与未来收益率之间的Pearson相关系数
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `group_col` - 分组列名（可选，如按日期分组）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - IC值结果数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算每日IC值
+    /// ic_df = factor.ic(df, "factor_value", "next_return", "date")
+    /// ```
+    pub fn ic(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        group_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if let Some(_group) = group_col {
+            // 按组计算IC（简化版本，手动实现）
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("分组IC计算暂未实现，请在Python层面实现"));
+        } else {
+            // 全局IC
+            let factor_series = data.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", factor_col, e)))?
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+            
+            let return_series = data.column(return_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", return_col, e)))?
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+            // 手动计算Pearson相关系数
+            let ic = calculate_pearson_corr(&factor_series, &return_series)?;
+            
+            let result = df!(
+                "ic" => [ic]
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+            
+            Ok(PyDataFrame(result))
+        }
+    }
+
+    /// IR值计算（信息比率）
+    /// 
+    /// 计算IC的均值除以IC的标准差
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（通常是IC序列）
+    /// * `ic_col` - IC列名
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - IR值结果
+    /// 
+    /// # Example
+    /// ```python
+    /// # 先计算IC，再计算IR
+    /// ic_df = factor.ic(df, "factor_value", "next_return", "date")
+    /// ir_df = factor.ir(ic_df, "ic")
+    /// ```
+    pub fn ir(
+        &self,
+        df: PyDataFrame,
+        ic_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        let ic_series = data.column(ic_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", ic_col, e)))?
+            .cast(&DataType::Float64)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+        let ic_values = ic_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let mut sum = 0.0;
         let mut count = 0;
-        
-        for i in 0..factor_values.len() {
-            if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
-                if !f.is_nan() && !r.is_nan() {
-                    factor_sum += f;
-                    return_sum += r;
+        for i in 0..ic_values.len() {
+            if let Some(v) = ic_values.get(i) {
+                if !v.is_nan() {
+                    sum += v;
                     count += 1;
                 }
             }
         }
-        
-        if count < 2 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("样本量不足"));
-        }
-        
-        let factor_mean = factor_sum / count as f64;
-        let return_mean = return_sum / count as f64;
-        
-        // 计算协方差和标准差
-        let mut cov = 0.0;
-        let mut factor_var = 0.0;
-        let mut return_var = 0.0;
-        
-        for i in 0..factor_values.len() {
-            if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
-                if !f.is_nan() && !r.is_nan() {
-                    let factor_diff = f - factor_mean;
-                    let return_diff = r - return_mean;
-                    cov += factor_diff * return_diff;
-                    factor_var += factor_diff * factor_diff;
-                    return_var += return_diff * return_diff;
+        let mean = if count > 0 { sum / count as f64 } else { f64::NAN };
+
+        let mut sum_sq = 0.0;
+        for i in 0..ic_values.len() {
+            if let Some(v) = ic_values.get(i) {
+                if !v.is_nan() {
+                    sum_sq += (v - mean).powi(2);
                 }
             }
         }
-        
-        let factor_std = factor_var.sqrt();
-        let return_std = return_var.sqrt();
-        
-        if factor_std == 0.0 || return_std == 0.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("标准差为0，无法计算相关系数"));
-        }
-        
-        let ic = cov / (factor_std * return_std);
-        Ok(ic)
+        let std = if count > 1 { (sum_sq / (count - 1) as f64).sqrt() } else { f64::NAN };
+
+        let ir = if std > 0.0 { mean / std } else { f64::NAN };
+
+        let result = df!(
+            "ic_mean" => [mean],
+            "ic_std" => [std],
+            "ir" => [ir]
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
     }
 
-    /// IR值（信息比率）
+    /// Rank IC计算（秩相关系数）
     /// 
-    /// IR = IC均值 / IC标准差
-    /// 衡量因子收益的稳定性和持续性，IR越高表示因子越稳定
+    /// 计算因子值与未来收益率之间的Spearman秩相关系数
     /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame，需要有时间序列
-    /// - `factor_col`: 因子列名
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// - `period`: 滚动计算IC的窗口期（默认20）
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `group_col` - 分组列名（可选）
     /// 
-    /// # 返回
-    /// IR值（IC的均值除以IC的标准差）
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - Rank IC值结果
     /// 
-    /// # 评价标准
-    /// - IR > 0.5: 因子较稳定
-    /// - IR > 1.0: 因子很稳定
-    /// - IR > 2.0: 因子非常优秀
-    #[pyo3(signature = (df, factor_col, return_col="future_return", period=20))]
-    pub fn ir(&self, df: PyDataFrame, factor_col: &str, return_col: &str, period: usize) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
+    /// # Example
+    /// ```python
+    /// # 计算每日Rank IC
+    /// rank_ic_df = factor.rank_ic(df, "factor_value", "next_return", "date")
+    /// ```
+    pub fn rank_ic(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        group_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if let Some(_group) = group_col {
+            // 按组计算Rank IC（简化版本）
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("分组Rank IC计算暂未实现，请在Python层面实现"));
+        } else {
+            // 全局Rank IC
+            let factor_series = data.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", factor_col, e)))?
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+            
+            let return_series = data.column(return_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", return_col, e)))?
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+            let rank_ic = calculate_spearman_corr(&factor_series, &return_series)?;
+            
+            let result = df!(
+                "rank_ic" => [rank_ic]
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+            
+            Ok(PyDataFrame(result))
+        }
+    }
+
+    /// 分层分析
+    /// 
+    /// 将因子值分成N层，计算各层的平均收益率
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `n_quantiles` - 分层数量（默认5）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 各层统计结果
+    /// 
+    /// # Example
+    /// ```python
+    /// # 5分层分析
+    /// quantile_df = factor.quantile(df, "factor_value", "next_return", 5)
+    /// ```
+    pub fn quantile(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        n_quantiles: Option<i32>,
+    ) -> PyResult<PyDataFrame> {
+        let mut data = df.0;
+        let n = n_quantiles.unwrap_or(5);
+
+        // 计算分位数并添加分组列
+        let factor_series = data.column(factor_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", factor_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
+
+        let factor_values = factor_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
         let len = factor_values.len();
-        if len < period + 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("数据长度不足"));
-        }
-        
-        // 滚动计算IC
-        let mut ic_series: Vec<f64> = Vec::new();
-        
-        for i in period..len {
-            let start = i - period;
-            
-            // 计算这个窗口的IC
-            let mut factor_sum = 0.0;
-            let mut return_sum = 0.0;
-            let mut count = 0;
-            
-            for j in start..i {
-                if let (Some(f), Some(r)) = (factor_values.get(j), return_values.get(j)) {
-                    if !f.is_nan() && !r.is_nan() {
-                        factor_sum += f;
-                        return_sum += r;
-                        count += 1;
-                    }
-                }
-            }
-            
-            if count < 2 {
-                continue;
-            }
-            
-            let factor_mean = factor_sum / count as f64;
-            let return_mean = return_sum / count as f64;
-            
-            let mut cov = 0.0;
-            let mut factor_var = 0.0;
-            let mut return_var = 0.0;
-            
-            for j in start..i {
-                if let (Some(f), Some(r)) = (factor_values.get(j), return_values.get(j)) {
-                    if !f.is_nan() && !r.is_nan() {
-                        let factor_diff = f - factor_mean;
-                        let return_diff = r - return_mean;
-                        cov += factor_diff * return_diff;
-                        factor_var += factor_diff * factor_diff;
-                        return_var += return_diff * return_diff;
-                    }
-                }
-            }
-            
-            let factor_std = factor_var.sqrt();
-            let return_std = return_var.sqrt();
-            
-            if factor_std > 0.0 && return_std > 0.0 {
-                let ic = cov / (factor_std * return_std);
-                ic_series.push(ic);
-            }
-        }
-        
-        if ic_series.len() < 2 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("有效IC数量不足"));
-        }
-        
-        // 计算IC的均值和标准差
-        let ic_mean = ic_series.iter().sum::<f64>() / ic_series.len() as f64;
-        let ic_var = ic_series.iter().map(|ic| (ic - ic_mean).powi(2)).sum::<f64>() / ic_series.len() as f64;
-        let ic_std = ic_var.sqrt();
-        
-        if ic_std == 0.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("IC标准差为0"));
-        }
-        
-        let ir = ic_mean / ic_std;
-        Ok(ir)
-    }
+        let mut quantile_groups = vec![0i32; len];
 
-    /// Rank IC值
-    /// 
-    /// Rank IC = 因子排名与收益率排名的Spearman秩相关系数
-    /// 对异常值更稳健，适合非线性关系的因子
-    /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame
-    /// - `factor_col`: 因子列名
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// 
-    /// # 返回
-    /// Rank IC值（范围[-1, 1]）
-    /// 
-    /// # 说明
-    /// Rank IC通常比IC更稳定，因为它只关注排序关系而非绝对值
-    #[pyo3(signature = (df, factor_col, return_col="future_return"))]
-    pub fn rank_ic(&self, df: PyDataFrame, factor_col: &str, return_col: &str) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        // 提取有效数据
-        let mut valid_data: Vec<(f64, f64)> = Vec::new();
-        for i in 0..factor_values.len() {
-            if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
-                if !f.is_nan() && !r.is_nan() {
-                    valid_data.push((f, r));
+        // 排序并分组
+        let mut pairs: Vec<(usize, f64)> = Vec::new();
+        for i in 0..len {
+            if let Some(v) = factor_values.get(i) {
+                if !v.is_nan() {
+                    pairs.push((i, v));
                 }
             }
         }
-        
-        if valid_data.len() < 2 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("样本量不足"));
-        }
-        
-        // 计算因子排名
-        let mut factor_ranks = vec![0.0; valid_data.len()];
-        for i in 0..valid_data.len() {
-            let mut rank = 1.0;
-            for j in 0..valid_data.len() {
-                if valid_data[j].0 > valid_data[i].0 {
-                    rank += 1.0;
-                }
-            }
-            factor_ranks[i] = rank;
-        }
-        
-        // 计算收益率排名
-        let mut return_ranks = vec![0.0; valid_data.len()];
-        for i in 0..valid_data.len() {
-            let mut rank = 1.0;
-            for j in 0..valid_data.len() {
-                if valid_data[j].1 > valid_data[i].1 {
-                    rank += 1.0;
-                }
-            }
-            return_ranks[i] = rank;
-        }
-        
-        // 计算排名相关系数
-        let n = valid_data.len() as f64;
-        let rank_mean = (n + 1.0) / 2.0;
-        
-        let mut cov = 0.0;
-        let mut factor_var = 0.0;
-        let mut return_var = 0.0;
-        
-        for i in 0..valid_data.len() {
-            let factor_diff = factor_ranks[i] - rank_mean;
-            let return_diff = return_ranks[i] - rank_mean;
-            cov += factor_diff * return_diff;
-            factor_var += factor_diff * factor_diff;
-            return_var += return_diff * return_diff;
-        }
-        
-        let rank_ic = cov / (factor_var.sqrt() * return_var.sqrt());
-        Ok(rank_ic)
-    }
+        pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    /// 分层回测（多空组合收益分析）
-    /// 
-    /// 将因子分成N层，计算每层的平均收益率
-    /// 用于检验因子的单调性和区分度
-    /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame
-    /// - `factor_col`: 因子列名
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// - `n_quantiles`: 分层数量（默认5）
-    /// 
-    /// # 返回
-    /// 包含quantile和mean_return列的DataFrame
-    /// 
-    /// # 评价标准
-    /// - 单调性：分层收益应呈现单调递增/递减
-    /// - 多空收益：最高层与最低层收益差（Long-Short Return）
-    /// - 区分度：各层收益差异越大越好
-    #[pyo3(signature = (df, factor_col, return_col="future_return", n_quantiles=5))]
-    pub fn quantile(&self, df: PyDataFrame, factor_col: &str, return_col: &str, n_quantiles: usize) -> PyResult<PyDataFrame> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        // 提取有效数据
-        let mut valid_data: Vec<(f64, f64)> = Vec::new();
-        for i in 0..factor_values.len() {
-            if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
-                if !f.is_nan() && !r.is_nan() {
-                    valid_data.push((f, r));
-                }
-            }
+        let group_size = (pairs.len() as f64 / n as f64).ceil() as usize;
+        for (rank, (idx, _)) in pairs.iter().enumerate() {
+            let group = (rank / group_size).min((n - 1) as usize) as i32 + 1;
+            quantile_groups[*idx] = group;
         }
-        
-        if valid_data.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("无有效数据"));
-        }
-        
-        // 按因子值排序
-        valid_data.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        
-        // 分层
-        let per_quantile = valid_data.len() / n_quantiles;
-        let mut quantile_returns: Vec<f64> = Vec::new();
-        let mut quantile_labels: Vec<i32> = Vec::new();
-        
-        for q in 0..n_quantiles {
-            let start = q * per_quantile;
-            let end = if q == n_quantiles - 1 {
-                valid_data.len()
-            } else {
-                (q + 1) * per_quantile
-            };
-            
-            let mut sum = 0.0;
-            let mut count = 0;
-            
-            for i in start..end {
-                sum += valid_data[i].1;
-                count += 1;
-            }
-            
-            if count > 0 {
-                quantile_labels.push((q + 1) as i32);
-                quantile_returns.push(sum / count as f64);
-            }
-        }
-        
-        let result = DataFrame::new(vec![
-            Series::new(PlSmallStr::from_str("quantile"), quantile_labels).into(),
-            Series::new(PlSmallStr::from_str("mean_return"), quantile_returns).into(),
-        ]).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果DataFrame失败: {}", e)))?;
-        
+
+        let group_series = Series::new("quantile_group".into(), quantile_groups);
+        data.with_column(group_series)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加分组列失败: {}", e)))?;
+
+        // 按分组计算统计量
+        let result = data.lazy()
+            .group_by([col("quantile_group")])
+            .agg([
+                col(return_col).mean().alias("mean_return"),
+                col(return_col).count().alias("count"),
+            ])
+            .sort(["quantile_group"], Default::default())
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分层统计失败: {}", e)))?;
+
         Ok(PyDataFrame(result))
     }
 
     /// 因子覆盖度
     /// 
-    /// 覆盖度 = 有效因子值数量 / 总样本数量
+    /// 计算因子的非空值占比
     /// 
-    /// # 参数
-    /// - `df`: 包含因子数据的DataFrame
-    /// - `factor_col`: 因子列名
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_col` - 因子列名
+    /// * `group_col` - 分组列名（可选）
     /// 
-    /// # 返回
-    /// 覆盖度（0-1之间的比例）
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 覆盖度统计
     /// 
-    /// # 评价标准
-    /// - 覆盖度 > 0.8: 较好
-    /// - 覆盖度 > 0.9: 优秀
-    #[pyo3(signature = (df, factor_col))]
-    pub fn coverage(&self, df: PyDataFrame, factor_col: &str) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let total = factor_values.len();
-        let mut valid_count = 0;
-        
-        for i in 0..total {
-            if let Some(val) = factor_values.get(i) {
-                if !val.is_nan() && !val.is_infinite() {
-                    valid_count += 1;
-                }
-            }
+    /// # Example
+    /// ```python
+    /// # 计算每日因子覆盖度
+    /// coverage_df = factor.coverage(df, "factor_value", "date")
+    /// ```
+    pub fn coverage(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        group_col: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if let Some(group) = group_col {
+            // 按组计算覆盖度
+            let result = data.lazy()
+                .group_by([col(group)])
+                .agg([
+                    col(factor_col).count().alias("valid_count"),
+                    len().alias("total_count"),
+                ])
+                .with_column(
+                    (col("valid_count").cast(DataType::Float64) / 
+                     col("total_count").cast(DataType::Float64)).alias("coverage")
+                )
+                .collect()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("计算覆盖度失败: {}", e)))?;
+            
+            Ok(PyDataFrame(result))
+        } else {
+            // 全局覆盖度
+            let factor_series = data.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", factor_col, e)))?;
+
+            let valid_count = factor_series.len() - factor_series.null_count();
+            let total_count = data.height();
+            let coverage = valid_count as f64 / total_count as f64;
+
+            let result = df!(
+                "valid_count" => [valid_count as i64],
+                "total_count" => [total_count as i64],
+                "coverage" => [coverage]
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+            Ok(PyDataFrame(result))
         }
-        
-        Ok(valid_count as f64 / total as f64)
     }
 
     /// IC胜率
     /// 
-    /// IC胜率 = IC>0的次数 / 总次数
-    /// 衡量因子预测方向的准确率
+    /// 计算IC > 0的比例
     /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame
-    /// - `factor_col`: 因子列名
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// - `period`: 滚动窗口（默认20）
+    /// # Arguments
+    /// * `df` - 输入数据框（IC序列）
+    /// * `ic_col` - IC列名
     /// 
-    /// # 返回
-    /// IC胜率（0-1之间的比例）
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - IC胜率统计
     /// 
-    /// # 评价标准
-    /// - IC胜率 > 0.5: 因子有预测能力
-    /// - IC胜率 > 0.6: 因子较强
-    /// - IC胜率 > 0.7: 因子很强
-    #[pyo3(signature = (df, factor_col, return_col="future_return", period=20))]
-    pub fn ic_win_rate(&self, df: PyDataFrame, factor_col: &str, return_col: &str, period: usize) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
+    /// # Example
+    /// ```python
+    /// ic_df = factor.ic(df, "factor_value", "next_return", "date")
+    /// win_rate_df = factor.ic_win_rate(ic_df, "ic")
+    /// ```
+    pub fn ic_win_rate(
+        &self,
+        df: PyDataFrame,
+        ic_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        let ic_series = data.column(ic_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", ic_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        let len = factor_values.len();
-        if len < period + 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("数据长度不足"));
-        }
-        
-        let mut positive_ic_count = 0;
-        let mut total_ic_count = 0;
-        
-        // 滚动计算IC
-        for i in period..len {
-            let start = i - period;
-            
-            let mut factor_sum = 0.0;
-            let mut return_sum = 0.0;
-            let mut count = 0;
-            
-            for j in start..i {
-                if let (Some(f), Some(r)) = (factor_values.get(j), return_values.get(j)) {
-                    if !f.is_nan() && !r.is_nan() {
-                        factor_sum += f;
-                        return_sum += r;
-                        count += 1;
+
+        let ic_values = ic_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        let mut win_count = 0;
+        let mut total_count = 0;
+        for i in 0..ic_values.len() {
+            if let Some(v) = ic_values.get(i) {
+                if !v.is_nan() {
+                    total_count += 1;
+                    if v > 0.0 {
+                        win_count += 1;
                     }
                 }
             }
-            
-            if count < 2 {
-                continue;
-            }
-            
-            let factor_mean = factor_sum / count as f64;
-            let return_mean = return_sum / count as f64;
-            
-            let mut cov = 0.0;
-            let mut factor_var = 0.0;
-            let mut return_var = 0.0;
-            
-            for j in start..i {
-                if let (Some(f), Some(r)) = (factor_values.get(j), return_values.get(j)) {
-                    if !f.is_nan() && !r.is_nan() {
-                        let factor_diff = f - factor_mean;
-                        let return_diff = r - return_mean;
-                        cov += factor_diff * return_diff;
-                        factor_var += factor_diff * factor_diff;
-                        return_var += return_diff * return_diff;
-                    }
-                }
-            }
-            
-            let factor_std = factor_var.sqrt();
-            let return_std = return_var.sqrt();
-            
-            if factor_std > 0.0 && return_std > 0.0 {
-                let ic = cov / (factor_std * return_std);
-                total_ic_count += 1;
-                if ic > 0.0 {
-                    positive_ic_count += 1;
-                }
-            }
         }
-        
-        if total_ic_count == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("无有效IC"));
-        }
-        
-        Ok(positive_ic_count as f64 / total_ic_count as f64)
+
+        let win_rate = if total_count > 0 {
+            win_count as f64 / total_count as f64
+        } else {
+            f64::NAN
+        };
+
+        let result = df!(
+            "win_count" => [win_count as i64],
+            "total_count" => [total_count as i64],
+            "win_rate" => [win_rate]
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
     }
 
-    /// 多空收益（Long-Short Return）
+    /// 多空收益率
     /// 
-    /// 多空收益 = 最高分位收益 - 最低分位收益
-    /// 衡量因子的盈利能力
+    /// 计算多头组合（高因子值）与空头组合（低因子值）的收益差
     /// 
-    /// # 参数
-    /// - `df`: 包含因子和收益率数据的DataFrame
-    /// - `factor_col`: 因子列名
-    /// - `return_col`: 未来收益率列名（默认"future_return"）
-    /// - `n_quantiles`: 分层数量（默认5）
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `top_pct` - 多头比例（默认0.2，即前20%）
+    /// * `bottom_pct` - 空头比例（默认0.2，即后20%）
     /// 
-    /// # 返回
-    /// 多空收益（最高层收益 - 最低层收益）
-    #[pyo3(signature = (df, factor_col, return_col="future_return", n_quantiles=5))]
-    pub fn long_short(&self, df: PyDataFrame, factor_col: &str, return_col: &str, n_quantiles: usize) -> PyResult<f64> {
-        let data: DataFrame = df.into();
-        
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let returns = data.column(return_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益率列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 多空收益统计
+    /// 
+    /// # Example
+    /// ```python
+    /// # 计算多空收益（前20% vs 后20%）
+    /// ls_df = factor.long_short(df, "factor_value", "next_return", 0.2, 0.2)
+    /// ```
+    pub fn long_short(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        top_pct: Option<f64>,
+        bottom_pct: Option<f64>,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+        let top = top_pct.unwrap_or(0.2);
+        let bottom = bottom_pct.unwrap_or(0.2);
+
+        let factor_series = data.column(factor_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", factor_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        let return_values = returns.f64()
+
+        let return_series = data.column(return_col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("列 '{}' 不存在: {}", return_col, e)))?
+            .cast(&DataType::Float64)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
-        
-        // 提取有效数据
-        let mut valid_data: Vec<(f64, f64)> = Vec::new();
+
+        let factor_values = factor_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+        let return_values = return_series.f64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+        // 收集有效数据对
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
         for i in 0..factor_values.len() {
             if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
                 if !f.is_nan() && !r.is_nan() {
-                    valid_data.push((f, r));
+                    pairs.push((f, r));
                 }
             }
         }
-        
-        if valid_data.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("无有效数据"));
-        }
-        
+
         // 按因子值排序
-        valid_data.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        
-        // 计算最高层和最低层的平均收益
-        let per_quantile = valid_data.len() / n_quantiles;
-        
-        // 最低层（第1层）
-        let mut low_sum = 0.0;
-        let mut low_count = 0;
-        for i in 0..per_quantile {
-            low_sum += valid_data[i].1;
-            low_count += 1;
-        }
-        
-        // 最高层（第N层）
-        let high_start = (n_quantiles - 1) * per_quantile;
-        let mut high_sum = 0.0;
-        let mut high_count = 0;
-        for i in high_start..valid_data.len() {
-            high_sum += valid_data[i].1;
-            high_count += 1;
-        }
-        
-        if low_count == 0 || high_count == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("分层数据不足"));
-        }
-        
-        let low_return = low_sum / low_count as f64;
-        let high_return = high_sum / high_count as f64;
-        
-        Ok(high_return - low_return)
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = pairs.len();
+        let top_n = (n as f64 * top).ceil() as usize;
+        let bottom_n = (n as f64 * bottom).ceil() as usize;
+
+        // 计算多头和空头的平均收益
+        let long_return = if top_n > 0 {
+            let sum: f64 = pairs.iter().rev().take(top_n).map(|(_, r)| r).sum();
+            sum / top_n as f64
+        } else {
+            f64::NAN
+        };
+
+        let short_return = if bottom_n > 0 {
+            let sum: f64 = pairs.iter().take(bottom_n).map(|(_, r)| r).sum();
+            sum / bottom_n as f64
+        } else {
+            f64::NAN
+        };
+
+        let ls_return = long_return - short_return;
+
+        let result = df!(
+            "long_return" => [long_return],
+            "short_return" => [short_return],
+            "long_short_return" => [ls_return]
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
     }
 
     /// 因子换手率
     /// 
-    /// 换手率 = 相邻两期分层组合中股票变化的比例
-    /// 衡量因子的稳定性，换手率越低表示因子越稳定
+    /// 计算相邻两期因子排名的变化程度
     /// 
-    /// # 参数
-    /// - `df`: 包含因子数据的DataFrame（需要包含时间列和分组列）
-    /// - `factor_col`: 因子列名
-    /// - `date_col`: 时间列名（默认"date"）
-    /// - `group_col`: 分组列名（如股票代码，默认"symbol"）
-    /// - `n_quantiles`: 分层数量（默认5）
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列和标识列）
+    /// * `factor_col` - 因子列名
+    /// * `time_col` - 时间列名
+    /// * `id_col` - 标识列名（如股票代码）
     /// 
-    /// # 返回
-    /// 平均换手率（0-2之间，单边换手率）
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 换手率统计
     /// 
-    /// # 评价标准
-    /// - 换手率 < 0.3: 因子很稳定
-    /// - 换手率 < 0.5: 因子较稳定
-    /// - 换手率 > 0.7: 因子不稳定
+    /// # Example
+    /// ```python
+    /// # 计算因子换手率
+    /// turnover_df = factor.turnover(df, "factor_value", "date", "stock_code")
+    /// ```
+    pub fn turnover(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        time_col: &str,
+        id_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        // 按时间和因子值排序，计算排名
+        let ranked = data.lazy()
+            .with_column(
+                col(factor_col).rank(
+                    RankOptions {
+                        method: RankMethod::Average,
+                        descending: false,
+                    },
+                    None
+                ).over([col(time_col)]).alias("factor_rank")
+            )
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("排名失败: {}", e)))?;
+
+        // 计算相邻期的排名变化
+        let with_lag = ranked.lazy()
+            .sort([time_col], Default::default())
+            .with_column(
+                col("factor_rank").shift(lit(1)).over([col(id_col)]).alias("prev_rank")
+            )
+            .with_column(
+                (col("factor_rank") - col("prev_rank")).abs().alias("rank_change")
+            )
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("计算排名变化失败: {}", e)))?;
+
+        // 按时间汇总换手率
+        let result = with_lag.lazy()
+            .group_by([col(time_col)])
+            .agg([
+                col("rank_change").mean().alias("avg_rank_change"),
+                col("rank_change").count().alias("count"),
+            ])
+            .sort([time_col], Default::default())
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("汇总换手率失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 因子清洗与正交化
     /// 
-    /// # 说明
-    /// 换手率的计算方法：
-    /// 1. 对每个时间截面，按因子值将股票分为n_quantiles组
-    /// 2. 对于相邻两期，计算每组中股票的变化比例
-    /// 3. 换手率 = (新增股票数 + 减少股票数) / (2 * 组内股票总数)
-    #[pyo3(signature = (df, factor_col, date_col="date", group_col="symbol", n_quantiles=5))]
-    pub fn turnover(&self, df: PyDataFrame, factor_col: &str, date_col: &str, group_col: &str, n_quantiles: usize) -> PyResult<f64> {
-        use std::collections::{HashMap, HashSet};
+    /// 对多个因子进行清洗、中性化和正交化处理
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框
+    /// * `factor_cols` - 要处理的因子列名列表
+    /// * `winsorize` - 是否进行缩尾处理，默认false
+    /// * `winsorize_n` - 缩尾的标准差倍数，默认3.0
+    /// * `neutralize` - 是否进行中性化，默认false
+    /// * `industry_col` - 行业列名，默认"industry"
+    /// * `cap_col` - 市值列名，默认"market_cap"
+    /// * `standardize` - 是否标准化，默认false
+    /// * `orthogonalize` - 是否正交化，默认false
+    /// * `suffix` - 输出列名后缀，默认"_clean"
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 包含清洗后因子的数据框
+    /// 
+    /// # Example
+    /// ```python
+    /// # 对多个因子进行清洗和正交化
+    /// df_clean = factor.clean(
+    ///     df,
+    ///     ["factor1", "factor2", "factor3"],
+    ///     winsorize=True,
+    ///     neutralize=True,
+    ///     orthogonalize=True
+    /// )
+    /// ```
+    #[pyo3(signature = (df, factor_cols, winsorize=false, winsorize_n=3.0, neutralize=false, industry_col="industry", cap_col="market_cap", standardize=false, orthogonalize=false, suffix="_clean"))]
+    pub fn clean(
+        &self,
+        df: PyDataFrame,
+        factor_cols: Vec<String>,
+        winsorize: bool,
+        winsorize_n: f64,
+        neutralize: bool,
+        industry_col: &str,
+        cap_col: &str,
+        standardize: bool,
+        orthogonalize: bool,
+        suffix: &str,
+    ) -> PyResult<PyDataFrame> {
+        use crate::data::clean as data_clean;
         
-        let data: DataFrame = df.into();
-        
-        // 获取所需的列
-        let factor = data.column(factor_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let dates = data.column(date_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取日期列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let groups = data.column(group_col)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取分组列失败: {}", e)))?
-            .as_materialized_series()
-            .clone();
-        
-        let factor_values = factor.f64()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("因子列转换失败: {}", e)))?;
-        
-        let group_values = groups.str()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组列转换失败: {}", e)))?;
-        
-        // 按日期分组数据
-        let mut date_data: HashMap<String, Vec<(String, f64)>> = HashMap::new();
-        
-        for i in 0..factor_values.len() {
-            if let (Some(factor_val), Some(group_val)) = (factor_values.get(i), group_values.get(i)) {
-                if !factor_val.is_nan() {
-                    let date_str = dates.get(i).unwrap().to_string();
-                    date_data.entry(date_str)
-                        .or_insert_with(Vec::new)
-                        .push((group_val.to_string(), factor_val));
+        if factor_cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("因子列表不能为空"));
+        }
+
+        let mut data = df.0;
+
+        // 第一步：对每个因子使用data::clean进行基础清洗
+        for factor_col in &factor_cols {
+            let winsorize_method = if winsorize { "std" } else { "none" };
+            let neutralize_method = if neutralize { "both" } else { "none" };
+            let standardize_method = if standardize { "zscore" } else { "none" };
+
+            let cleaned = data_clean(
+                PyDataFrame(data.clone()),
+                factor_col,
+                None,
+                winsorize_method,
+                Some(winsorize_n),
+                standardize_method,
+                neutralize_method,
+                Some(industry_col),
+                Some(cap_col),
+            )?;
+
+            data = cleaned.0;
+        }
+
+        // 第二步：如果需要正交化且有多个因子
+        if orthogonalize && factor_cols.len() > 1 {
+            let cleaned_cols: Vec<String> = factor_cols.iter()
+                .map(|col| format!("{}_clean", col))
+                .collect();
+            
+            data = orthogonalize_factors(data, cleaned_cols, "orth_")?;
+
+            // 重命名正交化后的列
+            for factor_col in &factor_cols {
+                let orth_col_name = format!("orth_{}_clean", factor_col);
+                let final_col_name = format!("{}{}", factor_col, suffix);
+
+                if let Ok(col) = data.column(&orth_col_name) {
+                    let renamed = col.clone().with_name(PlSmallStr::from(final_col_name.as_str()));
+                    data = data.drop(&orth_col_name)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除列失败: {}", e)))?;
+                    data = data.with_column(renamed)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+                        .clone();
+                }
+                
+                // 删除中间的_clean列
+                let clean_col_name = format!("{}_clean", factor_col);
+                if data.column(&clean_col_name).is_ok() {
+                    data = data.drop(&clean_col_name)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除列失败: {}", e)))?;
+                }
+            }
+        } else {
+            // 不正交化，直接重命名
+            for factor_col in &factor_cols {
+                let clean_col_name = format!("{}_clean", factor_col);
+                let final_col_name = format!("{}{}", factor_col, suffix);
+
+                if let Ok(col) = data.column(&clean_col_name) {
+                    let renamed = col.clone().with_name(PlSmallStr::from(final_col_name.as_str()));
+                    data = data.drop(&clean_col_name)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除列失败: {}", e)))?;
+                    data = data.with_column(renamed)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+                        .clone();
                 }
             }
         }
-        
-        // 对每个日期的数据按因子值排序并分组
-        let mut sorted_dates: Vec<String> = date_data.keys().cloned().collect();
-        sorted_dates.sort();
-        
-        if sorted_dates.len() < 2 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("至少需要2个时间截面"));
+
+        Ok(PyDataFrame(data))
+    }
+
+    // ====================================================================
+    // 单因子检验 (Single Factor Tests)
+    // ====================================================================
+
+    /// IC检验
+    /// 
+    /// 计算因子与收益率的信息系数，返回IC均值、标准差、t统计量和p值
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `method` - 相关系数方法："pearson"或"spearman"，默认"pearson"
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - IC统计结果（ic_mean, ic_std, t_stat, p_value）
+    #[pyo3(signature = (df, factor_col, return_col, time_col, method="pearson"))]
+    pub fn test(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        method: &str,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        // 按时间分组计算IC
+        let time_groups = data.partition_by([time_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let mut ic_values = Vec::new();
+
+        for group_df in time_groups {
+            let factor_series = group_df.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+            let return_series = group_df.column(return_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益列失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+
+            let ic = match method {
+                "pearson" => calculate_pearson_corr(&factor_series, &return_series)?,
+                "spearman" => calculate_spearman_corr(&factor_series, &return_series)?,
+                _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("不支持的方法: {}", method)
+                )),
+            };
+
+            if !ic.is_nan() {
+                ic_values.push(ic);
+            }
         }
+
+        if ic_values.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("没有有效的IC值"));
+        }
+
+        // 计算IC统计量
+        let n = ic_values.len() as f64;
+        let ic_mean = ic_values.iter().sum::<f64>() / n;
+        let ic_var = ic_values.iter().map(|x| (x - ic_mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let ic_std = ic_var.sqrt();
+        let t_stat = ic_mean / (ic_std / n.sqrt());
         
-        let mut all_turnovers = Vec::new();
+        // 简化的p值计算（双尾检验）
+        let p_value = if t_stat.abs() > 2.576 {
+            0.01
+        } else if t_stat.abs() > 1.96 {
+            0.05
+        } else if t_stat.abs() > 1.645 {
+            0.10
+        } else {
+            1.0 - (t_stat.abs() / 3.0).min(0.999)
+        };
+
+        let result = df!(
+            "ic_mean" => [ic_mean],
+            "ic_std" => [ic_std],
+            "t_stat" => [t_stat],
+            "p_value" => [p_value],
+            "n_periods" => [n]
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 分组回测
+    /// 
+    /// 将因子分N组，计算各组收益率，并进行单调性检验
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `n_groups` - 分组数量，默认5
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 各组平均收益率
+    #[pyo3(signature = (df, factor_col, return_col, time_col, n_groups=5))]
+    pub fn sorts(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        n_groups: usize,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if n_groups < 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("分组数量必须>=2"));
+        }
+
+        // 按时间和因子值分组 - 使用cut进行等频分组
+        let with_rank = data.lazy()
+            .with_column(
+                col(factor_col)
+                    .rank(
+                        RankOptions {
+                            method: RankMethod::Average,
+                            descending: false,
+                        },
+                        None
+                    )
+                    .over([col(time_col)])
+                    .alias("_rank")
+            )
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("排名失败: {}", e)))?;
+
+        // 将排名转换为分组
+        let with_group = with_rank.lazy()
+            .with_column(
+                ((col("_rank") - lit(1.0)) * lit(n_groups as f64) / col("_rank").max().over([col(time_col)]))
+                    .floor()
+                    .cast(DataType::Int32)
+                    .alias("factor_group")
+            )
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        // 删除临时_rank列
+        let with_group = with_group.drop("_rank")
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("删除临时列失败: {}", e)))?;
+
+        // 计算各组平均收益
+        let result = with_group.lazy()
+            .group_by([col("factor_group")])
+            .agg([
+                col(return_col).mean().alias("mean_return"),
+                col(return_col).std(1).alias("std_return"),
+                col(return_col).count().alias("count"),
+            ])
+            .sort(["factor_group"], Default::default())
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("计算失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 因子收益率
+    /// 
+    /// 计算因子的时间序列收益率（用于因子择时）
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 因子收益率时间序列
+    #[pyo3(signature = (df, factor_col, return_col, time_col))]
+    pub fn mimick(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        use crate::data::linear;
         
-        // 计算相邻两期的换手率
-        for i in 0..(sorted_dates.len() - 1) {
-            let curr_date = &sorted_dates[i];
-            let next_date = &sorted_dates[i + 1];
-            
-            let curr_data = &date_data[curr_date];
-            let next_data = &date_data[next_date];
-            
-            // 对当期数据按因子值排序
-            let mut curr_sorted = curr_data.clone();
-            curr_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            
-            let mut next_sorted = next_data.clone();
-            next_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            
-            let curr_size = curr_sorted.len();
-            let next_size = next_sorted.len();
-            
-            if curr_size < n_quantiles || next_size < n_quantiles {
+        let data = df.0;
+
+        // 按时间分组，进行横截面回归
+        let time_groups = data.partition_by([time_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let mut times = Vec::new();
+        let mut factor_returns = Vec::new();
+
+        for group_df in time_groups {
+            let time_value = group_df.column(time_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间失败: {}", e)))?
+                .get(0)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间值失败: {}", e)))?
+                .to_string();
+
+            // 横截面回归
+            let (_, stats) = linear(
+                PyDataFrame(group_df.clone()),
+                vec![factor_col.to_string()],
+                return_col,
+                None,
+                None,
+                true,
+            )?;
+
+            if let Some((coeffs, _)) = stats {
+                if !coeffs.is_empty() {
+                    times.push(time_value);
+                    factor_returns.push(coeffs[0]);
+                }
+            }
+        }
+
+        let result = df!(
+            time_col => times,
+            "factor_return" => factor_returns
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// IC衰减分析
+    /// 
+    /// 计算因子对未来N期收益的预测能力衰减
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列和标识列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `id_col` - 标识列名
+    /// * `max_periods` - 最大预测期数，默认10
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - IC衰减序列
+    #[pyo3(signature = (df, factor_col, return_col, time_col, id_col, max_periods=10))]
+    pub fn decay(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        id_col: &str,
+        max_periods: i64,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        let mut periods = Vec::new();
+        let mut ic_values = Vec::new();
+
+        for lag in 1..=max_periods {
+            // 创建lag期的收益率
+            let with_lag = data.clone().lazy()
+                .sort([time_col], Default::default())
+                .with_column(
+                    col(return_col).shift(lit(-lag)).over([col(id_col)]).alias("future_return")
+                )
+                .collect()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建lag失败: {}", e)))?;
+
+            // 计算IC
+            let factor_series = with_lag.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子列失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+            let return_series = with_lag.column("future_return")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益列失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+
+            let ic = calculate_pearson_corr(&factor_series, &return_series)?;
+
+            if !ic.is_nan() {
+                periods.push(lag);
+                ic_values.push(ic);
+            }
+        }
+
+        let result = df!(
+            "period" => periods,
+            "ic" => ic_values
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    // ====================================================================
+    // 多因子回归分析 (Multi-Factor Regression)
+    // ====================================================================
+
+    /// Fama-MacBeth回归
+    /// 
+    /// 横截面回归+时间序列统计，估计因子风险溢价
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_cols` - 因子列名列表
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 因子风险溢价及t统计量
+    #[pyo3(signature = (df, factor_cols, return_col, time_col))]
+    pub fn fama(
+        &self,
+        df: PyDataFrame,
+        factor_cols: Vec<String>,
+        return_col: &str,
+        time_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        use crate::data::linear;
+        
+        let data = df.0;
+
+        // 按时间分组进行横截面回归
+        let time_groups = data.partition_by([time_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let n_factors = factor_cols.len();
+        let mut all_coeffs = vec![Vec::new(); n_factors];
+
+        for group_df in time_groups {
+            let (_, stats) = linear(
+                PyDataFrame(group_df),
+                factor_cols.clone(),
+                return_col,
+                None,
+                None,
+                true,
+            )?;
+
+            if let Some((coeffs, _)) = stats {
+                for (i, coeff) in coeffs.iter().enumerate() {
+                    if i < n_factors {
+                        all_coeffs[i].push(*coeff);
+                    }
+                }
+            }
+        }
+
+        // 计算时间序列统计量
+        let mut factor_names = Vec::new();
+        let mut mean_coeffs = Vec::new();
+        let mut t_stats = Vec::new();
+
+        for (i, factor_name) in factor_cols.iter().enumerate() {
+            let coeffs = &all_coeffs[i];
+            if !coeffs.is_empty() {
+                let n = coeffs.len() as f64;
+                let mean = coeffs.iter().sum::<f64>() / n;
+                let var = coeffs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let std = var.sqrt();
+                let t_stat = mean / (std / n.sqrt());
+
+                factor_names.push(factor_name.clone());
+                mean_coeffs.push(mean);
+                t_stats.push(t_stat);
+            }
+        }
+
+        let result = df!(
+            "factor" => factor_names,
+            "risk_premium" => mean_coeffs,
+            "t_stat" => t_stats
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 时间序列回归
+    /// 
+    /// 分析个股收益对因子的暴露度（factor loading）
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列和标识列）
+    /// * `factor_cols` - 因子列名列表
+    /// * `return_col` - 收益率列名
+    /// * `id_col` - 标识列名
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 各股票的因子暴露度
+    #[pyo3(signature = (df, factor_cols, return_col, id_col))]
+    pub fn regress(
+        &self,
+        df: PyDataFrame,
+        factor_cols: Vec<String>,
+        return_col: &str,
+        id_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        use crate::data::linear;
+        
+        let data = df.0;
+
+        // 按标识分组进行时间序列回归
+        let id_groups = data.partition_by([id_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let mut ids = Vec::new();
+        let mut all_loadings = vec![Vec::new(); factor_cols.len()];
+        let mut r_squareds = Vec::new();
+
+        for group_df in id_groups {
+            let id_value = group_df.column(id_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取ID失败: {}", e)))?
+                .get(0)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取ID值失败: {}", e)))?
+                .to_string();
+
+            let (_, stats) = linear(
+                PyDataFrame(group_df.clone()),
+                factor_cols.clone(),
+                return_col,
+                None,
+                None,
+                true,
+            )?;
+
+            if let Some((loadings, r_sq)) = stats {
+                ids.push(id_value);
+                r_squareds.push(r_sq);
+                
+                for (i, loading) in loadings.iter().enumerate() {
+                    if i < factor_cols.len() {
+                        all_loadings[i].push(*loading);
+                    }
+                }
+            }
+        }
+
+        // 构建结果DataFrame
+        let mut result = df!(
+            id_col => ids.clone(),
+            "r_squared" => r_squareds
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        for (i, factor_name) in factor_cols.iter().enumerate() {
+            let loading_col = Series::new(PlSmallStr::from(factor_name.as_str()), all_loadings[i].clone());
+            result = result.with_column(loading_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("添加列失败: {}", e)))?
+                .clone();
+        }
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 因子模拟组合
+    /// 
+    /// 构建因子模拟组合（Factor Mimicking Portfolio）
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `long_pct` - 多头比例，默认0.3
+    /// * `short_pct` - 空头比例，默认0.3
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 因子模拟组合收益序列
+    #[pyo3(signature = (df, factor_col, return_col, time_col, long_pct=0.3, short_pct=0.3))]
+    pub fn portfolio(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        long_pct: f64,
+        short_pct: f64,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        // 按时间分组
+        let time_groups = data.partition_by([time_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let mut times = Vec::new();
+        let mut portfolio_returns = Vec::new();
+
+        for group_df in time_groups {
+            let time_col_data = group_df.column(time_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间失败: {}", e)))?;
+            let time_value = time_col_data
+                .get(0)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间值失败: {}", e)))?
+                .to_string();
+
+            let factor_series = group_df.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子失败: {}", e)))?
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+            let return_series = group_df.column(return_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益失败: {}", e)))?
+                .cast(&DataType::Float64)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?;
+
+            let factor_values = factor_series.f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+            let return_values = return_series.f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取数值失败: {}", e)))?;
+
+            // 收集有效数据对
+            let mut pairs: Vec<(f64, f64)> = Vec::new();
+            for i in 0..factor_values.len() {
+                if let (Some(f), Some(r)) = (factor_values.get(i), return_values.get(i)) {
+                    if !f.is_nan() && !r.is_nan() {
+                        pairs.push((f, r));
+                    }
+                }
+            }
+
+            if pairs.is_empty() {
                 continue;
             }
-            
-            // 计算每个分位数的换手率
-            for q in 0..n_quantiles {
-                // 计算当前分位的索引范围
-                let curr_start = (q * curr_size) / n_quantiles;
-                let curr_end = ((q + 1) * curr_size) / n_quantiles;
-                
-                let next_start = (q * next_size) / n_quantiles;
-                let next_end = ((q + 1) * next_size) / n_quantiles;
-                
-                // 获取当期和下期该分位的股票集合
-                let curr_stocks: HashSet<String> = curr_sorted[curr_start..curr_end]
-                    .iter()
-                    .map(|(s, _)| s.clone())
-                    .collect();
-                
-                let next_stocks: HashSet<String> = next_sorted[next_start..next_end]
-                    .iter()
-                    .map(|(s, _)| s.clone())
-                    .collect();
-                
-                // 计算换手率：(新增 + 减少) / (2 * 平均持仓)
-                let added = next_stocks.difference(&curr_stocks).count();
-                let removed = curr_stocks.difference(&next_stocks).count();
-                let avg_size = (curr_stocks.len() + next_stocks.len()) as f64 / 2.0;
-                
-                if avg_size > 0.0 {
-                    let turnover_rate = (added + removed) as f64 / (2.0 * avg_size);
-                    all_turnovers.push(turnover_rate);
-                }
+
+            // 按因子值排序
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            let n = pairs.len();
+            let long_n = (n as f64 * long_pct).ceil() as usize;
+            let short_n = (n as f64 * short_pct).ceil() as usize;
+
+            // 计算多空组合收益
+            let long_return = if long_n > 0 {
+                let sum: f64 = pairs.iter().rev().take(long_n).map(|(_, r)| r).sum();
+                sum / long_n as f64
+            } else {
+                0.0
+            };
+
+            let short_return = if short_n > 0 {
+                let sum: f64 = pairs.iter().take(short_n).map(|(_, r)| r).sum();
+                sum / short_n as f64
+            } else {
+                0.0
+            };
+
+            times.push(time_value);
+            portfolio_returns.push(long_return - short_return);
+        }
+
+        let result = df!(
+            time_col => times,
+            "portfolio_return" => portfolio_returns
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    // ====================================================================
+    // 稳健性检验 (Robustness Tests)
+    // ====================================================================
+
+    /// 子期检验
+    /// 
+    /// 将样本分为多个子期，检验因子在各子期的稳定性
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `n_subsamples` - 子期数量，默认3
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 各子期的IC统计
+    #[pyo3(signature = (df, factor_col, return_col, time_col, n_subsamples=3))]
+    pub fn subsample(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        n_subsamples: usize,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if n_subsamples < 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("子期数量必须>=2"));
+        }
+
+        let n_total = data.height();
+        let subsample_size = n_total / n_subsamples;
+
+        let mut subsample_ids: Vec<i32> = Vec::new();
+        let mut ic_means = Vec::new();
+        let mut ic_stds = Vec::new();
+
+        for i in 0..n_subsamples {
+            let start_idx = i * subsample_size;
+            let end_idx = if i == n_subsamples - 1 {
+                n_total
+            } else {
+                (i + 1) * subsample_size
+            };
+
+            let subsample = data.slice(start_idx as i64, end_idx - start_idx);
+
+            // 对子样本调用test
+            let ic_result = self.test(
+                PyDataFrame(subsample),
+                factor_col,
+                return_col,
+                time_col,
+                "pearson",
+            )?;
+
+            let ic_mean = ic_result.0.column("ic_mean")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取IC均值失败: {}", e)))?
+                .f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?
+                .get(0)
+                .unwrap_or(f64::NAN);
+
+            let ic_std = ic_result.0.column("ic_std")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取IC标准差失败: {}", e)))?
+                .f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?
+                .get(0)
+                .unwrap_or(f64::NAN);
+
+            subsample_ids.push((i + 1) as i32);
+            ic_means.push(ic_mean);
+            ic_stds.push(ic_std);
+        }
+
+        let result = df!(
+            "subsample" => subsample_ids,
+            "ic_mean" => ic_means,
+            "ic_std" => ic_stds
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 分组检验
+    /// 
+    /// 按行业或市值分组，检验因子在各组的表现
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列和分组列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `group_col` - 分组列名（如行业、市值分组）
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 各组的IC统计
+    #[pyo3(signature = (df, factor_col, return_col, time_col, group_col))]
+    pub fn subgroup(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        group_col: &str,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        // 按分组列分组
+        let groups = data.partition_by([group_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let mut group_names = Vec::new();
+        let mut ic_means = Vec::new();
+        let mut ic_stds = Vec::new();
+
+        for group_df in groups {
+            let group_value = group_df.column(group_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取分组值失败: {}", e)))?
+                .get(0)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取分组名失败: {}", e)))?
+                .to_string();
+
+            // 对每组调用test
+            let ic_result = self.test(
+                PyDataFrame(group_df.clone()),
+                factor_col,
+                return_col,
+                time_col,
+                "pearson",
+            )?;
+
+            let ic_mean = ic_result.0.column("ic_mean")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取IC均值失败: {}", e)))?
+                .f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?
+                .get(0)
+                .unwrap_or(f64::NAN);
+
+            let ic_std = ic_result.0.column("ic_std")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取IC标准差失败: {}", e)))?
+                .f64()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("转换失败: {}", e)))?
+                .get(0)
+                .unwrap_or(f64::NAN);
+
+            group_names.push(group_value);
+            ic_means.push(ic_mean);
+            ic_stds.push(ic_std);
+        }
+
+        let result = df!(
+            group_col => group_names,
+            "ic_mean" => ic_means,
+            "ic_std" => ic_stds
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
+    }
+
+    /// 滚动IC分析
+    /// 
+    /// 使用滚动窗口计算IC，观察因子效果的时间稳定性
+    /// 
+    /// # Arguments
+    /// * `df` - 输入数据框（需包含时间列）
+    /// * `factor_col` - 因子列名
+    /// * `return_col` - 收益率列名
+    /// * `time_col` - 时间列名
+    /// * `window` - 滚动窗口大小（期数），默认20
+    /// 
+    /// # Returns
+    /// * `PyResult<PyDataFrame>` - 滚动IC序列
+    #[pyo3(signature = (df, factor_col, return_col, time_col, window=20))]
+    pub fn rolling(
+        &self,
+        df: PyDataFrame,
+        factor_col: &str,
+        return_col: &str,
+        time_col: &str,
+        window: usize,
+    ) -> PyResult<PyDataFrame> {
+        let data = df.0;
+
+        if window < 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("窗口大小必须>=2"));
+        }
+
+        // 按时间排序
+        let sorted = data.lazy()
+            .sort([time_col], Default::default())
+            .collect()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("排序失败: {}", e)))?;
+
+        // 按时间分组
+        let time_groups = sorted.partition_by([time_col], true)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("分组失败: {}", e)))?;
+
+        let n_periods = time_groups.len();
+        
+        if n_periods < window {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("期数({})小于窗口大小({})", n_periods, window)
+            ));
+        }
+
+        let mut times = Vec::new();
+        let mut rolling_ics = Vec::new();
+
+        // 对每个时间窗口计算IC
+        for i in (window - 1)..n_periods {
+            // 合并窗口内的数据
+            let mut window_data = time_groups[i - window + 1].clone();
+            for j in (i - window + 2)..=i {
+                window_data = window_data.vstack(&time_groups[j])
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("合并失败: {}", e)))?;
             }
+
+            // 计算窗口IC
+            let factor_series = window_data.column(factor_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取因子失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+            let return_series = window_data.column(return_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取收益失败: {}", e)))?
+                .as_materialized_series()
+                .clone();
+
+            let ic = calculate_pearson_corr(&factor_series, &return_series)?;
+
+            // 获取窗口结束时间
+            let end_time = time_groups[i].column(time_col)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间失败: {}", e)))?
+                .get(0)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("获取时间值失败: {}", e)))?
+                .to_string();
+
+            times.push(end_time);
+            rolling_ics.push(ic);
         }
-        
-        if all_turnovers.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("无法计算换手率"));
-        }
-        
-        // 返回平均换手率
-        let avg_turnover = all_turnovers.iter().sum::<f64>() / all_turnovers.len() as f64;
-        Ok(avg_turnover)
+
+        let result = df!(
+            time_col => times,
+            "rolling_ic" => rolling_ics
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("创建结果失败: {}", e)))?;
+
+        Ok(PyDataFrame(result))
     }
 }

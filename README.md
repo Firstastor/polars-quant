@@ -162,6 +162,187 @@ shape: (252, 11)
 
 ---
 
+#### 3. 线性回归
+
+##### `linear(df, x_cols, y_col, pred_col, resid_col, return_stats)`
+
+对数据进行线性回归分析，支持一元和多元线性回归。
+
+**参数**：
+- `df` (DataFrame): 输入数据
+- `x_cols` (List[str]): 自变量列名列表（支持多个特征）
+- `y_col` (str): 因变量列名
+- `pred_col` (str, 可选): 预测值列名，默认 `"pred"`
+- `resid_col` (str, 可选): 残差列名，默认 `"resid"`
+- `return_stats` (bool, 可选): 是否返回回归统计量，默认 False
+
+**返回**：
+- 如果 `return_stats=False`: 返回 DataFrame（包含预测值和残差列）
+- 如果 `return_stats=True`: 返回 `(DataFrame, (coefficients, r_squared))`
+  - `coefficients`: 回归系数列表 `[b0, b1, b2, ..., bn]`，其中 b0 为截距
+  - `r_squared`: R² 决定系数
+
+**示例**：
+```python
+import polars as pl
+from polars_quant import linear
+
+# 准备数据
+df = pl.DataFrame({
+    "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+    "market_cap": [1000.0, 1100.0, 1050.0, 1200.0],
+    "pe_ratio": [15.0, 16.0, 14.5, 17.0],
+    "pb_ratio": [2.0, 2.1, 1.95, 2.2],
+    "return": [0.02, 0.01, -0.005, 0.03]
+})
+
+# 1. 一元线性回归
+df_result, (coeffs, r2) = linear(
+    df, 
+    x_cols=["market_cap"], 
+    y_col="return",
+    return_stats=True
+)
+print(f"截距: {coeffs[0]:.4f}, 斜率: {coeffs[1]:.4f}, R²: {r2:.4f}")
+# 输出：截距: 0.0123, 斜率: 0.0001, R²: 0.8234
+
+# 2. 多元线性回归（同时考虑多个因素）
+df_result, (coeffs, r2) = linear(
+    df,
+    x_cols=["market_cap", "pe_ratio", "pb_ratio"],
+    y_col="return",
+    pred_col="predicted_return",
+    resid_col="residual",
+    return_stats=True
+)
+print(f"截距: {coeffs[0]:.4f}")
+print(f"市值系数: {coeffs[1]:.4f}, PE系数: {coeffs[2]:.4f}, PB系数: {coeffs[3]:.4f}")
+print(f"R²: {r2:.4f}")
+
+# 3. 因子中性化（去除市值影响）
+df_neutral = linear(
+    df,
+    x_cols=["market_cap"],
+    y_col="return",
+    resid_col="market_neutral_return"
+)
+# 使用残差作为市值中性化后的收益
+
+# 4. 计算股票相对市场的 Beta
+df_beta, (coeffs, r2) = linear(
+    df,
+    x_cols=["market_return"],
+    y_col="stock_return",
+    return_stats=True
+)
+beta = coeffs[1]  # 斜率即为 Beta 值
+alpha = coeffs[0]  # 截距即为 Alpha 值
+```
+
+---
+
+#### 4. 因子清洗
+
+##### `clean(df, col, winsorize, winsorize_n, neutralize_market_cap, cap_col, neutralize_industry, industry_col, standardize)`
+
+对因子数据进行清洗，包括去极值、中性化和标准化处理。
+
+**参数**：
+- `df` (DataFrame): 输入数据
+- `col` (str): 要清洗的因子列名
+- `winsorize` (str, 可选): 去极值方法，默认不去极值
+  - `"mad"`: MAD（中位数绝对偏差）法
+  - `"sigma"`: 标准差法，配合 `winsorize_n` 参数
+  - `"percentile"`: 百分位法，配合 `winsorize_n` 参数
+- `winsorize_n` (float, 可选): 去极值参数
+  - sigma 方法：保留均值 ± n 倍标准差内的数据，默认 3.0
+  - percentile 方法：保留 n% 到 (100-n)% 分位数内的数据，默认 1.0
+- `neutralize_market_cap` (bool, 可选): 是否进行市值中性化，默认 False
+- `cap_col` (str, 可选): 市值列名，当 `neutralize_market_cap=True` 时必须提供
+- `neutralize_industry` (bool, 可选): 是否进行行业中性化，默认 False
+- `industry_col` (str, 可选): 行业列名，当 `neutralize_industry=True` 时必须提供
+- `standardize` (bool, 可选): 是否标准化，默认 False
+
+**返回**：DataFrame（在原 DataFrame 基础上添加清洗后的因子列，列名为 `{col}_cleaned`）
+
+**处理顺序**：去极值 → 市值中性化 → 行业中性化 → 标准化
+
+**示例**：
+```python
+import polars as pl
+from polars_quant import clean
+
+# 准备数据
+df = pl.DataFrame({
+    "date": ["2024-01-01"] * 5,
+    "stock_code": ["000001", "000002", "000003", "000004", "000005"],
+    "factor": [1.5, 2.3, 10.0, 1.8, 2.1],  # 存在极值 10.0
+    "market_cap": [100.0, 200.0, 150.0, 300.0, 250.0],
+    "industry": ["金融", "科技", "金融", "科技", "消费"]
+})
+
+# 1. 仅标准化
+df_result = clean(df, col="factor", standardize=True)
+
+# 2. MAD 去极值 + 标准化
+df_result = clean(
+    df, 
+    col="factor",
+    winsorize="mad",
+    standardize=True
+)
+
+# 3. 3 倍标准差去极值 + 标准化
+df_result = clean(
+    df,
+    col="factor",
+    winsorize="sigma",
+    winsorize_n=3.0,
+    standardize=True
+)
+
+# 4. 百分位法去极值（保留 1%-99%）+ 标准化
+df_result = clean(
+    df,
+    col="factor",
+    winsorize="percentile",
+    winsorize_n=1.0,
+    standardize=True
+)
+
+# 5. 完整清洗流程：去极值 + 市值中性化 + 行业中性化 + 标准化
+df_result = clean(
+    df,
+    col="factor",
+    winsorize="mad",
+    neutralize_market_cap=True,
+    cap_col="market_cap",
+    neutralize_industry=True,
+    industry_col="industry",
+    standardize=True
+)
+print(df_result["factor_cleaned"])
+
+# 6. 仅市值中性化（适合单因子测试）
+df_result = clean(
+    df,
+    col="factor",
+    neutralize_market_cap=True,
+    cap_col="market_cap"
+)
+
+# 7. 仅行业中性化
+df_result = clean(
+    df,
+    col="factor",
+    neutralize_industry=True,
+    industry_col="industry",
+    standardize=True
+)
+```
+
+---
+
 ### 二、回测类 (Backtest)
 
 #### 1. 构造函数
@@ -1210,7 +1391,7 @@ bt.summary()  # 查看详细统计
 
 ## 🔬 因子挖掘与评估
 
-polars-quant 提供了强大的因子挖掘和评估工具，支持多种技术因子计算和专业的因子评估指标。
+polars-quant 提供了强大的因子计算和评估工具，支持通用因子计算方法和专业的因子评估指标，适用于基本面、宏观、技术等各类因子研究。
 
 ### 因子分析完整流程
 
@@ -1223,80 +1404,280 @@ df = pl.DataFrame({
     "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
     "symbol": ["AAPL", "AAPL", "AAPL"],
     "close": [150.0, 152.0, 148.0],
-    "high": [151.0, 153.0, 149.0],
-    "low": [149.0, 151.0, 147.0],
-    "volume": [1000000, 1200000, 900000]
+    "volume": [1000000, 1200000, 900000],
+    "market_cap": [2.5e12, 2.52e12, 2.46e12],
+    "net_profit": [100e9, 98e9, 102e9],
+    "pe_ratio": [25.5, 26.0, 24.8]
 })
 
 # 2. 创建Factor实例
 factor = Factor()
 
-# 3. 计算因子
-df = factor.momentum(df, period=20)              # 动量因子
-df = factor.volatility(df, period=20)            # 波动率因子
-df = factor.volume_factor(df, period=20)         # 成交量因子
-df = factor.rsi_factor(df, period=14)            # RSI因子
+# 3. 计算通用因子
+df = factor.ratio(df, "market_cap", "net_profit", "pe_ratio")  # 市盈率
+df = factor.diff(df, "pe_ratio", "pe_prev", "pe_growth", normalize=True)  # PE增长率
+df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe")  # 市值加权PE
+df = factor.normalize(df, "pe_ratio", "zscore", "pe_zscore")  # 标准化
+df = factor.rank(df, "market_cap", "cap_rank", False, True)  # 市值排名
 
-# 4. 评估因子（需要先添加收益率列 "return"）
-ic = factor.ic(df, "momentum")                   # 信息系数
-ir = factor.ir(df, "momentum")                   # 信息比率
-rank_ic = factor.rank_ic(df, "momentum")         # 秩相关系数
-quantile_df = factor.quantile(df, "momentum")    # 分层分析
-win_rate = factor.ic_win_rate(df, "momentum")    # IC胜率
-ls_return = factor.long_short(df, "momentum")    # 多空收益
-turnover_rate = factor.turnover(df, "momentum")  # 换手率
+# 4. 计算技术因子
+df = factor.moving_average(df, "close", 20, "ma20")  # 移动平均
+df = factor.momentum(df, "close", 20, "mom20")  # 动量
+df = factor.volatility(df, "close", 20, "vol20")  # 波动率
 
-print(f"IC: {ic:.4f}, IR: {ir:.4f}, Rank IC: {rank_ic:.4f}")
-print(f"IC胜率: {win_rate:.2%}, 多空收益: {ls_return:.4f}")
+# 5. 评估因子（需要先添加收益率列 "next_return"）
+ic_result = factor.ic(df, "pe_ratio", "next_return")  # IC值
+rank_ic_result = factor.rank_ic(df, "pe_ratio", "next_return")  # Rank IC
+quantile_result = factor.quantile(df, "pe_ratio", "next_return", 5)  # 分层分析
+ls_result = factor.long_short(df, "pe_ratio", "next_return", 0.2, 0.2)  # 多空收益
+
+print(f"IC结果: {ic_result}")
+print(f"Rank IC结果: {rank_ic_result}")
 ```
 
-### 多种动量计算方法
+### 通用因子计算示例
 
 ```python
-# 1. 简单收益率动量（默认）
-df = factor.momentum(df, period=20)
+# 1. 比值因子（适用于基本面分析）
+df = factor.ratio(df, "market_cap", "book_value", "pb_ratio")  # 市净率
+df = factor.ratio(df, "current_assets", "current_liabilities", "current_ratio")  # 流动比率
 
-# 2. 对数收益率动量（适合长周期）
-df = factor.momentum(df, period=60, method="log", factor_col="log_momentum")
+# 2. 差值因子（适用于增长分析）
+df = factor.diff(df, "revenue", "revenue_last_year", "revenue_growth", normalize=True)
+df = factor.diff(df, "net_profit", "operating_profit", "profit_diff")
 
-# 3. 残差动量（去除市场整体趋势）
-df = factor.momentum(df, period=20, method="residual", factor_col="residual_mom")
+# 3. 加权因子（适用于市值加权）
+df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe")
+df = factor.weighted(df, "roe", "market_cap", "weighted_roe", ["industry"])
 
-# 4. 动量加速度（捕捉趋势变化）
-df = factor.momentum(df, period=20, method="acceleration", factor_col="mom_accel")
+# 4. 标准化因子
+df = factor.normalize(df, "pb_ratio", "zscore", "pb_zscore")  # Z-Score
+df = factor.normalize(df, "market_cap", "minmax", "cap_scaled")  # MinMax
+df = factor.normalize(df, "pe_ratio", "quantile", "pe_quantile")  # 分位数
 
-# 5. 批量评估多个因子
-for col in ["momentum", "log_momentum", "residual_mom", "mom_accel"]:
-    ic = factor.ic(df, col)
-    print(f"{col}: IC={ic:.4f}")
+# 5. 排名因子
+df = factor.rank(df, "pe_ratio", "pe_rank", True, False)  # 排名（1-N）
+df = factor.rank(df, "market_cap", "cap_pct", False, True)  # 百分比排名（0-1）
 ```
 
-### 可用的因子
+### 可用的因子方法
 
-**技术因子（15+）**：
-- `momentum()` - 动量因子（支持4种计算方法）
-- `reversal()` - 反转因子
+**通用因子计算（5种）**：
+- `ratio()` - 比值计算（PE、PB、财务比率等）
+- `diff()` - 差值计算（增长率、利润差等）
+- `weighted()` - 加权计算（市值加权、成交量加权等）
+- `normalize()` - 标准化（Z-Score、MinMax、分位数等）
+- `rank()` - 排名（升序/降序、数值/百分比）
+
+**常用技术因子（5种）**：
+- `moving_average()` - 移动平均
+- `momentum()` - 动量因子
 - `volatility()` - 波动率因子
-- `volume_factor()` - 成交量因子
-- `price_volume_corr()` - 价量相关性
-- `price_acceleration()` - 价格加速度
 - `skewness()` - 偏度因子
-- `kurtosis()` - 峰度因子
-- `max_drawdown()` - 最大回撤因子
-- `turnover_factor()` - 换手率因子
-- `amplitude_factor()` - 振幅因子
-- `price_volume_divergence()` - 价量背离
-- `rsi_factor()` - RSI因子
+- `relative_strength()` - 相对强弱
 
 **评估指标（8种）**：
-- `ic()` - IC值（信息系数）
+- `ic()` - IC值（信息系数，Pearson相关）
 - `ir()` - IR值（信息比率）
-- `rank_ic()` - Rank IC（秩相关系数）
+- `rank_ic()` - Rank IC（Spearman秩相关）
 - `quantile()` - 分层分析
 - `coverage()` - 因子覆盖率
 - `ic_win_rate()` - IC胜率
 - `long_short()` - 多空收益
 - `turnover()` - 因子换手率
+
+---
+
+### 因子检验三步流程
+
+polars-quant 提供完整的因子检验框架，包括单因子检验、多因子回归分析和稳健性检验。
+
+#### 前置处理：因子预处理
+
+在进行因子检验前，通常需要对多因子进行预处理，消除因子间的线性相关性：
+
+```python
+from polars_quant import Factor
+
+factor = Factor()
+
+# 正交化处理（直接修改因子值）
+df = factor.clean(
+    df,
+    factor_cols=["size", "value", "momentum"],
+    method="orthogonalize"
+)
+# 结果: size不变，value和momentum被正交化
+
+# 中性化处理（保留原始值，添加残差列）
+df = factor.clean(
+    df,
+    factor_cols=["size", "value", "momentum"],
+    method="neutralize"
+)
+# 结果: 新增 value_residual 和 momentum_residual 列
+```
+
+#### 第一步：单因子检验
+
+评估单个因子的预测能力和收益特征：
+
+```python
+# 1. IC检验（信息系数）
+ic_result = factor.ic_test(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    method="pearson"  # 或 "spearman"
+)
+# 返回: time, ic, t_stat, p_value
+
+# 2. 投资组合排序
+sorts_result = factor.portfolio_sorts(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    n_quantiles=5
+)
+# 返回: quantile, mean_return, std_return, sharpe
+
+# 3. 因子收益率（截面回归）
+fr_result = factor.factor_return(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date"
+)
+# 返回: time, factor_return, t_stat, p_value
+
+# 4. IC衰减分析
+decay_result = factor.ic_decay(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    id_col="stock_code",
+    max_lag=10
+)
+# 返回: lag, ic, t_stat, p_value
+```
+
+#### 第二步：多因子回归分析
+
+分析多个因子的联合解释能力和相对重要性：
+
+```python
+# 1. Fama-MacBeth回归
+fm_result = factor.fama_macbeth(
+    df,
+    factor_cols=["size", "value", "momentum"],
+    return_col="next_return",
+    time_col="date"
+)
+# 返回: factor, mean_coef, t_stat, p_value
+
+# 2. 时间序列回归
+ts_result = factor.time_series_regression(
+    df,
+    factor_cols=["size", "value", "momentum"],
+    return_col="next_return",
+    id_col="stock_code"
+)
+# 返回: id, factor, coefficient, t_stat, p_value, r_squared
+
+# 3. 因子模拟组合
+fmp_result = factor.factor_mimicking_portfolio(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    top_pct=0.3,
+    bottom_pct=0.3
+)
+# 返回: time, long_return, short_return, ls_return
+```
+
+#### 第三步：稳健性检验
+
+验证因子在不同样本和时间段的稳定性：
+
+```python
+# 1. 子期检验（分时段检验）
+subsample_result = factor.subsample_test(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    n_splits=3
+)
+# 返回: period, start_date, end_date, mean_ic, t_stat, p_value
+
+# 2. 分组检验（如行业、市值分组）
+subgroup_result = factor.subgroup_test(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    group_col="industry"
+)
+# 返回: group, mean_ic, t_stat, p_value
+
+# 3. 滚动IC检验
+rolling_result = factor.rolling_ic(
+    df,
+    factor_col="value",
+    return_col="next_return",
+    time_col="date",
+    window=60
+)
+# 返回: time, rolling_ic, rolling_ir
+```
+
+#### 完整检验流程示例
+
+```python
+import polars as pl
+from polars_quant import Factor, returns
+
+# 准备数据
+df = pl.read_parquet("stock_data.parquet")
+df = returns(df, price_col="close", period=1, return_col="next_return")
+
+factor = Factor()
+
+# 预处理：多因子正交化
+df = factor.clean(
+    df,
+    factor_cols=["size", "value", "momentum"],
+    method="orthogonalize"
+)
+
+# 第一步：单因子检验
+ic_result = factor.ic_test(df, "value", "next_return", "date")
+sorts_result = factor.portfolio_sorts(df, "value", "next_return", "date", 5)
+fr_result = factor.factor_return(df, "value", "next_return", "date")
+decay_result = factor.ic_decay(df, "value", "next_return", "date", "stock_code", 10)
+
+# 第二步：多因子回归分析
+fm_result = factor.fama_macbeth(
+    df, ["size", "value", "momentum"], "next_return", "date"
+)
+ts_result = factor.time_series_regression(
+    df, ["size", "value", "momentum"], "next_return", "stock_code"
+)
+
+# 第三步：稳健性检验
+subsample_result = factor.subsample_test(df, "value", "next_return", "date", 3)
+subgroup_result = factor.subgroup_test(df, "value", "next_return", "industry")
+rolling_result = factor.rolling_ic(df, "value", "next_return", "date", 60)
+
+# 分析结果
+print("IC均值:", ic_result["ic"].mean())
+print("分层收益:", sorts_result)
+print("Fama-MacBeth系数:", fm_result)
+print("子期稳定性:", subsample_result)
+```
 
 ### 因子评估标准
 

@@ -120,6 +120,188 @@ def load(
     """
     ...
 
+def linear(
+    df: pl.DataFrame,
+    x_cols: List[str],
+    y_col: str,
+    pred_col: Optional[str] = None,
+    resid_col: Optional[str] = None,
+    return_stats: bool = False
+) -> tuple[pl.DataFrame, Optional[tuple[list[float], float]]]:
+    """
+    多元线性回归分析 y = b0 + b1*x1 + b2*x2 + ... + bn*xn
+    
+    对多个自变量和一个因变量进行线性回归，返回预测值、残差和统计指标
+    
+    Args:
+        df: 输入DataFrame
+        x_cols: 自变量列名列表
+        y_col: 因变量列名
+        pred_col: 预测值列名（可选，不指定则不添加预测值列）
+        resid_col: 残差列名（默认为"{y_col}_resid"）
+        return_stats: 是否返回统计信息（系数、R²）
+    
+    Returns:
+        (df, stats):
+            - df: 添加了预测值和/或残差列的DataFrame
+            - stats: 如果return_stats=True，返回([b0, b1, ..., bn], R²)，否则返回None
+              其中 b0 是截距，b1到bn是各自变量的系数
+    
+    Examples:
+        >>> import polars as pl
+        >>> import polars_quant as pq
+        >>> 
+        >>> # 一元线性回归：市值对收益率
+        >>> df = pl.DataFrame({
+        ...     "market_cap": [100, 200, 150, 300, 250],
+        ...     "return": [0.05, 0.08, 0.06, 0.10, 0.09]
+        ... })
+        >>> df, (coeffs, r2) = pq.linear(df, ["market_cap"], "return", 
+        ...                              pred_col="return_pred",
+        ...                              return_stats=True)
+        >>> print(f"截距: {coeffs[0]:.4f}, 斜率: {coeffs[1]:.4f}, R²: {r2:.4f}")
+        >>> 
+        >>> # 多元线性回归：市值+PE对收益率
+        >>> df = pl.DataFrame({
+        ...     "market_cap": [100, 200, 150, 300, 250],
+        ...     "pe_ratio": [15, 20, 18, 25, 22],
+        ...     "return": [0.05, 0.08, 0.06, 0.10, 0.09]
+        ... })
+        >>> df, (coeffs, r2) = pq.linear(df, ["market_cap", "pe_ratio"], "return",
+        ...                              return_stats=True)
+        >>> print(f"截距: {coeffs[0]:.4f}")
+        >>> print(f"market_cap系数: {coeffs[1]:.4f}")
+        >>> print(f"pe_ratio系数: {coeffs[2]:.4f}")
+        >>> print(f"R²: {r2:.4f}")
+        >>> 
+        >>> # 只获取残差（因子中性化）
+        >>> df, _ = pq.linear(df, ["pb_ratio"], "return", 
+        ...                   resid_col="return_neutral")
+        >>> 
+        >>> # 贝塔计算
+        >>> df, (coeffs, r2) = pq.linear(df, ["market_return"], "stock_return",
+        ...                              pred_col="predicted_return",
+        ...                              resid_col="alpha",
+        ...                              return_stats=True)
+        >>> alpha, beta = coeffs[0], coeffs[1]
+        >>> print(f"Alpha: {alpha:.4f}, Beta: {beta:.4f}, R²: {r2:.4f}")
+    
+    Notes:
+        - 自动处理缺失值（NaN）
+        - 残差 = 实际值 - 预测值
+        - R²表示模型的拟合优度（0-1之间，越接近1拟合越好）
+        - 支持一元或多元线性回归
+        - 可用于因子中性化：残差即为去除自变量影响后的纯因子
+        - 使用正规方程求解，适合中小规模数据
+    """
+    ...
+
+def clean(
+    df: pl.DataFrame,
+    col: str,
+    factor_col: Optional[str] = None,
+    winsorize: Literal["none", "mad", "sigma", "percentile"] = "none",
+    winsorize_n: Optional[float] = None,
+    standardize: Literal["none", "zscore", "minmax", "rank"] = "none",
+    neutralize: Literal["none", "industry", "market_cap"] = "none",
+    industry_col: Optional[str] = None,
+    cap_col: Optional[str] = None
+) -> pl.DataFrame:
+    """
+    数据清洗：去极值、中性化、标准化
+    
+    对数据进行清洗、去极值、标准化和中性化处理
+    
+    Args:
+        df: 输入DataFrame
+        col: 需要清洗的数据列名
+        factor_col: 输出列名（默认为"{col}_clean"）
+        winsorize: 去极值方法
+            - "none": 不去极值（默认）
+            - "mad": 中位数绝对偏差法 (median ± n×MAD)
+            - "sigma": N倍标准差法 (mean ± n×std)
+            - "percentile": 百分位法（1%-99%）
+        winsorize_n: 去极值的倍数
+            - mad: 默认3.0
+            - sigma: 默认3.0
+            - percentile: 不使用
+        standardize: 标准化方法
+            - "none": 不标准化（默认）
+            - "zscore": Z-Score标准化 (x - mean) / std
+            - "minmax": 最小-最大标准化 (x - min) / (max - min)
+            - "rank": 排名标准化（转为0-1分位数）
+        neutralize: 中性化方法
+            - "none": 不中性化（默认）
+            - "industry": 行业中性化（减去行业均值）
+            - "market_cap": 市值中性化（多元回归取残差）
+        industry_col: 行业列名（行业中性化需要）
+        cap_col: 市值列名（市值中性化需要）
+    
+    Returns:
+        添加了清洗后数据列的DataFrame
+    
+    Examples:
+        >>> import polars as pl
+        >>> import polars_quant as pq
+        >>> 
+        >>> # 基础清洗：3σ去极值 + Z-Score标准化
+        >>> df = pl.DataFrame({
+        ...     "pe_ratio": [10, 15, 20, 100, 18],  # 100是异常值
+        ... })
+        >>> df = pq.clean(df, "pe_ratio", "pe_clean", 
+        ...               winsorize="sigma", winsorize_n=3.0, 
+        ...               standardize="zscore")
+        >>> 
+        >>> # 2σ去极值（更保守）
+        >>> df = pq.clean(df, "pb_ratio", "pb_clean",
+        ...               winsorize="sigma", winsorize_n=2.0,
+        ...               standardize="zscore")
+        >>> 
+        >>> # MAD去极值（更稳健）
+        >>> df = pq.clean(df, "roe", "roe_clean",
+        ...               winsorize="mad", winsorize_n=3.0,
+        ...               standardize="zscore")
+        >>> 
+        >>> # 行业中性化
+        >>> df = pl.DataFrame({
+        ...     "momentum": [0.05, 0.08, 0.06, 0.10, 0.09],
+        ...     "industry": ["科技", "科技", "金融", "金融", "金融"]
+        ... })
+        >>> df = pq.clean(df, "momentum", "mom_clean",
+        ...               winsorize="sigma", winsorize_n=3.0,
+        ...               neutralize="industry", industry_col="industry",
+        ...               standardize="zscore")
+        >>> 
+        >>> # 市值中性化（使用多元线性回归）
+        >>> df = pl.DataFrame({
+        ...     "roa": [0.05, 0.08, 0.06, 0.10, 0.09],
+        ...     "market_cap": [100, 200, 150, 300, 250]
+        ... })
+        >>> df = pq.clean(df, "roa", "roa_clean",
+        ...               winsorize="percentile",
+        ...               neutralize="market_cap", cap_col="market_cap",
+        ...               standardize="zscore")
+        >>> 
+        >>> # 完整流程
+        >>> df = pq.clean(df, "factor_raw", "factor_clean",
+        ...               winsorize="mad", winsorize_n=3.0,
+        ...               neutralize="industry", industry_col="industry",
+        ...               standardize="zscore")
+    
+    Notes:
+        处理顺序：去极值 -> 中性化 -> 标准化
+        
+        去极值方法说明：
+        - MAD: 对异常值较为稳健，适合有极端值的数据
+        - sigma: 基于正态分布假设，可自定义倍数（如2σ、3σ、5σ等）
+        - percentile: 直接截断极端百分位
+        
+        中性化说明：
+        - 行业中性化：消除行业间的系统性差异
+        - 市值中性化：消除市值因素的影响（使用多元线性回归）
+    """
+    ...
+
 # ====================================================================
 # 回测引擎 (Backtesting Engine) - 独立资金池回测系统
 # ====================================================================
@@ -3895,18 +4077,18 @@ class Strategy:
 
 class Factor:
     """
-    因子挖掘和评估模块
+    因子计算和评估模块
     
-    提供因子计算、因子评估、IC分析等功能，用于量化选股和因子研究
+    提供通用的因子计算方法和专业的因子评估指标，适用于各类因子研究
+    包括基本面因子、宏观因子、情绪因子、技术因子等
     
     主要功能:
-    - 15+ 技术因子计算（动量、反转、波动率、成交量等）
+    - 5种通用因子计算方法（比值、差值、加权、标准化、排名）
+    - 5种常用因子计算（移动平均、动量、波动率、偏度、相对强弱）
     - 8种专业因子评估指标（IC、IR、Rank IC、分层分析等）
-    - 支持多种动量计算方法（简单收益率、对数收益率、残差动量、动量加速度）
-    - 支持自定义因子列名，可在同一DataFrame中计算多个因子
     
     Examples:
-        基本因子分析流程：
+        基本因子计算：
         >>> import polars as pl
         >>> from polars_quant import Factor
         >>> 
@@ -3915,34 +4097,48 @@ class Factor:
         ...     "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
         ...     "symbol": ["AAPL", "AAPL", "AAPL"],
         ...     "close": [150.0, 152.0, 148.0],
-        ...     "volume": [1000000, 1200000, 900000]
+        ...     "volume": [1000000, 1200000, 900000],
+        ...     "market_cap": [2.5e12, 2.52e12, 2.46e12],
+        ...     "pe_ratio": [25.5, 26.0, 24.8]
         ... })
         >>> 
         >>> # 创建Factor实例
         >>> factor = Factor()
         >>> 
-        >>> # 计算动量因子
-        >>> df = factor.momentum(df, period=20)
+        >>> # 计算市净率（基本面因子）
+        >>> df = factor.ratio(df, "market_cap", "book_value", "pb_ratio")
         >>> 
-        >>> # 计算波动率因子
-        >>> df = factor.volatility(df, period=20)
+        >>> # 计算市盈率增长差值
+        >>> df = factor.diff(df, "pe_ratio", "pe_ratio_prev", "pe_growth")
         >>> 
-        >>> # 评估因子（需要先有收益率列）
-        >>> ic = factor.ic(df, "momentum", "return")
-        >>> ir = factor.ir(df, "momentum", "return")
+        >>> # 计算市值加权PE
+        >>> df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe")
+        >>> 
+        >>> # 标准化因子
+        >>> df = factor.normalize(df, "pb_ratio", "zscore", "pb_zscore")
+        >>> 
+        >>> # 计算排名
+        >>> df = factor.rank(df, "market_cap", "cap_rank", False, True)
         
-        多种动量计算方法：
-        >>> # 简单收益率动量（默认）
-        >>> df = factor.momentum(df, period=20)
+        技术因子计算：
+        >>> # 移动平均
+        >>> df = factor.moving_average(df, "close", 20, "ma20")
         >>> 
-        >>> # 对数收益率动量
-        >>> df = factor.momentum(df, period=60, method="log", factor_col="log_momentum")
+        >>> # 动量因子
+        >>> df = factor.momentum(df, "close", 20, "mom20")
         >>> 
-        >>> # 残差动量（去除市场整体趋势）
-        >>> df = factor.momentum(df, period=20, method="residual", factor_col="residual_mom")
+        >>> # 波动率因子
+        >>> df = factor.volatility(df, "close", 20, "vol20")
+        
+        因子评估：
+        >>> # 计算IC值
+        >>> ic_result = factor.ic(df, "pb_ratio", "next_return")
         >>> 
-        >>> # 动量加速度（捕捉趋势变化）
-        >>> df = factor.momentum(df, period=20, method="acceleration", factor_col="mom_accel")
+        >>> # 计算IR值
+        >>> ir_result = factor.ir(ic_df, "ic")
+        >>> 
+        >>> # 分层分析
+        >>> quantile_result = factor.quantile(df, "pb_ratio", "next_return", 5)
     """
     
     def __init__(self) -> None:
@@ -3950,163 +4146,271 @@ class Factor:
         ...
     
     # ================================================================
-    # 因子计算方法
+    # 通用因子计算方法
     # ================================================================
+    
+    def ratio(
+        self,
+        df: pl.DataFrame,
+        numerator_col: str,
+        denominator_col: str,
+        factor_col: Optional[str] = None,
+        handle_zero: Literal["nan", "inf", "skip"] = "nan"
+    ) -> pl.DataFrame:
+        """
+        比值因子计算
+        
+        计算两列之间的比值，常用于基本面因子（如PE、PB）、宏观因子等
+        
+        Args:
+            df: 输入DataFrame
+            numerator_col: 分子列名
+            denominator_col: 分母列名
+            factor_col: 输出因子列名（可选，默认为 "{numerator}_{denominator}_ratio"）
+            handle_zero: 处理分母为0的情况
+                - "nan": 返回NaN（默认）
+                - "inf": 返回无穷大
+                - "skip": 返回分子值
+        
+        Returns:
+            添加了比值因子列的DataFrame
+        
+        Examples:
+            >>> # 计算市盈率
+            >>> df = factor.ratio(df, "market_cap", "net_profit", "pe_ratio")
+            >>> 
+            >>> # 计算市净率
+            >>> df = factor.ratio(df, "market_cap", "book_value", "pb_ratio")
+            >>> 
+            >>> # 计算流动比率
+            >>> df = factor.ratio(df, "current_assets", "current_liabilities", "current_ratio")
+        """
+        ...
+    
+    def diff(
+        self,
+        df: pl.DataFrame,
+        col1: str,
+        col2: str,
+        factor_col: Optional[str] = None,
+        normalize: bool = False
+    ) -> pl.DataFrame:
+        """
+        差值因子计算
+        
+        计算两列之间的差值，可选择是否标准化为百分比变化
+        
+        Args:
+            df: 输入DataFrame
+            col1: 第一列名
+            col2: 第二列名
+            factor_col: 输出因子列名（可选，默认为 "{col1}_{col2}_diff"）
+            normalize: 是否标准化为百分比变化 (col1 - col2) / col2
+        
+        Returns:
+            添加了差值因子列的DataFrame
+        
+        Examples:
+            >>> # 计算营收增长
+            >>> df = factor.diff(df, "revenue", "revenue_last_year", "revenue_growth", normalize=True)
+            >>> 
+            >>> # 计算利润差额
+            >>> df = factor.diff(df, "net_profit", "operating_profit", "profit_diff")
+        """
+        ...
+    
+    def weighted(
+        self,
+        df: pl.DataFrame,
+        value_col: str,
+        weight_col: str,
+        factor_col: Optional[str] = None,
+        group_cols: Optional[List[str]] = None
+    ) -> pl.DataFrame:
+        """
+        加权因子计算
+        
+        计算加权平均值，常用于市值加权、成交量加权等场景
+        
+        Args:
+            df: 输入DataFrame
+            value_col: 数值列名
+            weight_col: 权重列名
+            factor_col: 输出因子列名（可选，默认为 "{value}_{weight}_weighted"）
+            group_cols: 分组列名列表（可选，用于分组加权）
+        
+        Returns:
+            添加了加权因子列的DataFrame
+        
+        Examples:
+            >>> # 计算市值加权PE
+            >>> df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe")
+            >>> 
+            >>> # 按行业分组计算市值加权PE
+            >>> df = factor.weighted(df, "pe_ratio", "market_cap", "weighted_pe", ["industry"])
+        """
+        ...
+    
+    def normalize(
+        self,
+        df: pl.DataFrame,
+        col: str,
+        method: Literal["zscore", "minmax", "rank", "quantile"] = "zscore",
+        factor_col: Optional[str] = None
+    ) -> pl.DataFrame:
+        """
+        标准化因子
+        
+        对因子进行标准化处理，支持多种标准化方法
+        
+        Args:
+            df: 输入DataFrame
+            col: 需要标准化的列名
+            method: 标准化方法
+                - "zscore": Z-Score标准化 (x - mean) / std（默认）
+                - "minmax": 最小-最大标准化 (x - min) / (max - min)
+                - "rank": 转换为排名（1到N）
+                - "quantile": 转换为分位数（0到1）
+            factor_col: 输出因子列名（可选，默认为 "{col}_{method}_normalized"）
+        
+        Returns:
+            添加了标准化因子列的DataFrame
+        
+        Examples:
+            >>> # Z-Score标准化
+            >>> df = factor.normalize(df, "pe_ratio", "zscore", "pe_normalized")
+            >>> 
+            >>> # 最小-最大标准化
+            >>> df = factor.normalize(df, "pb_ratio", "minmax", "pb_normalized")
+            >>> 
+            >>> # 转换为排名
+            >>> df = factor.normalize(df, "market_cap", "rank", "cap_rank")
+        """
+        ...
+    
+    def rank(
+        self,
+        df: pl.DataFrame,
+        col: str,
+        factor_col: Optional[str] = None,
+        ascending: bool = True,
+        pct: bool = False
+    ) -> pl.DataFrame:
+        """
+        排名因子
+        
+        对因子进行排名，支持升降序和百分比排名
+        
+        Args:
+            df: 输入DataFrame
+            col: 需要排名的列名
+            factor_col: 输出因子列名（可选，默认为 "{col}_rank"）
+            ascending: 是否升序排名（True: 小值排名低, False: 大值排名低）
+            pct: 是否返回百分比排名（0-1之间）
+        
+        Returns:
+            添加了排名因子列的DataFrame
+        
+        Examples:
+            >>> # 按PE从小到大排名
+            >>> df = factor.rank(df, "pe_ratio", "pe_rank", True, False)
+            >>> 
+            >>> # 按市值从大到小排名（百分比）
+            >>> df = factor.rank(df, "market_cap", "cap_rank", False, True)
+        """
+        ...
+    
+    # ================================================================
+    # 常用因子计算方法
+    # ================================================================
+    
+    def moving_average(
+        self,
+        df: pl.DataFrame,
+        col: str,
+        window: int,
+        factor_col: Optional[str] = None
+    ) -> pl.DataFrame:
+        """
+        移动平均因子
+        
+        计算滑动窗口平均值
+        
+        Args:
+            df: 输入DataFrame
+            col: 需要计算的列名
+            window: 窗口大小
+            factor_col: 输出因子列名（可选，默认为 "{col}_ma{window}"）
+        
+        Returns:
+            添加了移动平均列的DataFrame
+        
+        Examples:
+            >>> # 20日移动平均
+            >>> df = factor.moving_average(df, "close", 20, "ma20")
+        """
+        ...
     
     def momentum(
         self,
         df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20,
-        method: str = "return",
-        factor_col: str = "momentum"
+        col: str,
+        period: int,
+        factor_col: Optional[str] = None
     ) -> pl.DataFrame:
         """
-        动量因子（增强版）
+        动量因子
         
-        计算价格动量，支持多种计算方式
+        计算价格动量 (current - past) / past
         
         Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
-            method: 计算方法（默认"return"）
-                - "return": 简单收益率 (current - past) / past
-                - "log": 对数收益率 ln(current / past)
-                - "residual": 残差动量（去除市场整体趋势）
-                - "acceleration": 动量加速度（动量的变化率）
-            factor_col: 因子列名（默认"momentum"）
+            df: 输入DataFrame
+            col: 价格列名
+            period: 回看周期
+            factor_col: 输出因子列名（可选，默认为 "{col}_mom{period}"）
         
         Returns:
             添加了动量因子列的DataFrame
         
         Examples:
-            >>> # 简单收益率动量（默认）
-            >>> df = factor.momentum(df, period=20)
-            >>> 
-            >>> # 对数收益率动量（适合长周期）
-            >>> df = factor.momentum(df, period=60, method="log")
-            >>> 
-            >>> # 残差动量（去除市场整体趋势）
-            >>> df = factor.momentum(df, period=20, method="residual")
-            >>> 
-            >>> # 动量加速度（捕捉趋势变化）
-            >>> df = factor.momentum(df, period=20, method="acceleration")
-        """
-        ...
-    
-    def reversal(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 5
-    ) -> pl.DataFrame:
-        """
-        反转因子
-        
-        短期反转效应：过去短期表现差的股票未来可能反转
-        
-        Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认5天）
-        
-        Returns:
-            添加了reversal因子列的DataFrame
+            >>> # 20日动量
+            >>> df = factor.momentum(df, "close", 20, "momentum_20")
         """
         ...
     
     def volatility(
         self,
         df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20
+        col: str,
+        window: int,
+        factor_col: Optional[str] = None
     ) -> pl.DataFrame:
         """
         波动率因子
         
-        计算价格的标准差作为波动率指标
+        计算收益率的标准差
         
         Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
+            df: 输入DataFrame
+            col: 价格列名
+            window: 窗口大小
+            factor_col: 输出因子列名（可选，默认为 "{col}_vol{window}"）
         
         Returns:
-            添加了volatility因子列的DataFrame
-        """
-        ...
-    
-    def volume_factor(
-        self,
-        df: pl.DataFrame,
-        volume_col: str = "volume",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        成交量因子
+            添加了波动率因子列的DataFrame
         
-        计算成交量相对于均值的偏离程度
-        
-        Args:
-            df: 包含成交量数据的DataFrame
-            volume_col: 成交量列名（默认"volume"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了volume_factor因子列的DataFrame
-        """
-        ...
-    
-    def price_volume_corr(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        volume_col: str = "volume",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        价量相关性因子
-        
-        计算价格和成交量的滚动相关系数
-        
-        Args:
-            df: 包含价格和成交量数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            volume_col: 成交量列名（默认"volume"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了price_volume_corr因子列的DataFrame
-        """
-        ...
-    
-    def price_acceleration(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        价格加速度因子
-        
-        计算价格变化的加速度（二阶导数）
-        
-        Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了price_acceleration因子列的DataFrame
+        Examples:
+            >>> # 20日波动率
+            >>> df = factor.volatility(df, "close", 20, "volatility_20")
         """
         ...
     
     def skewness(
         self,
         df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20
+        col: str,
+        window: int,
+        factor_col: Optional[str] = None
     ) -> pl.DataFrame:
         """
         偏度因子
@@ -4114,144 +4418,46 @@ class Factor:
         计算收益率分布的偏度
         
         Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
+            df: 输入DataFrame
+            col: 价格列名
+            window: 窗口大小
+            factor_col: 输出因子列名（可选，默认为 "{col}_skew{window}"）
         
         Returns:
-            添加了skewness因子列的DataFrame
+            添加了偏度因子列的DataFrame
+        
+        Examples:
+            >>> # 20日偏度
+            >>> df = factor.skewness(df, "close", 20, "skewness_20")
         """
         ...
     
-    def kurtosis(
+    def relative_strength(
         self,
         df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20
+        col: str,
+        benchmark_col: str,
+        period: int,
+        factor_col: Optional[str] = None
     ) -> pl.DataFrame:
         """
-        峰度因子
+        相对强弱因子
         
-        计算收益率分布的峰度
-        
-        Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了kurtosis因子列的DataFrame
-        """
-        ...
-    
-    def max_drawdown(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        最大回撤因子
-        
-        计算过去N天的最大回撤
+        计算相对于基准的表现
         
         Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认20天）
+            df: 输入DataFrame
+            col: 价格列名
+            benchmark_col: 基准列名
+            period: 回看周期
+            factor_col: 输出因子列名（可选，默认为 "{col}_rs{period}"）
         
         Returns:
-            添加了max_drawdown因子列的DataFrame
-        """
-        ...
-    
-    def turnover_factor(
-        self,
-        df: pl.DataFrame,
-        volume_col: str = "volume",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        换手率因子
+            添加了相对强弱因子列的DataFrame
         
-        计算成交量的变化率
-        
-        Args:
-            df: 包含成交量数据的DataFrame
-            volume_col: 成交量列名（默认"volume"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了turnover_factor因子列的DataFrame
-        """
-        ...
-    
-    def amplitude_factor(
-        self,
-        df: pl.DataFrame,
-        high_col: str = "high",
-        low_col: str = "low",
-        close_col: str = "close",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        振幅因子
-        
-        计算平均振幅
-        
-        Args:
-            df: 包含价格数据的DataFrame
-            high_col: 最高价列名（默认"high"）
-            low_col: 最低价列名（默认"low"）
-            close_col: 收盘价列名（默认"close"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了amplitude_factor因子列的DataFrame
-        """
-        ...
-    
-    def price_volume_divergence(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        volume_col: str = "volume",
-        period: int = 20
-    ) -> pl.DataFrame:
-        """
-        价量背离因子
-        
-        检测价格和成交量的背离情况
-        
-        Args:
-            df: 包含价格和成交量数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            volume_col: 成交量列名（默认"volume"）
-            period: 回看周期（默认20天）
-        
-        Returns:
-            添加了price_volume_divergence因子列的DataFrame
-        """
-        ...
-    
-    def rsi_factor(
-        self,
-        df: pl.DataFrame,
-        price_col: str = "close",
-        period: int = 14
-    ) -> pl.DataFrame:
-        """
-        RSI因子
-        
-        相对强弱指标，标准化到[-1, 1]区间
-        
-        Args:
-            df: 包含价格数据的DataFrame
-            price_col: 价格列名（默认"close"）
-            period: 回看周期（默认14天）
-        
-        Returns:
-            添加了rsi_factor因子列的DataFrame
+        Examples:
+            >>> # 相对市场的20日相对强弱
+            >>> df = factor.relative_strength(df, "close", "market_index", 20, "rs_20")
         """
         ...
     
@@ -4263,59 +4469,50 @@ class Factor:
         self,
         df: pl.DataFrame,
         factor_col: str,
-        return_col: str = "return"
-    ) -> float:
+        return_col: str,
+        group_col: Optional[str] = None
+    ) -> pl.DataFrame:
         """
-        IC值（信息系数）
+        IC值计算（信息系数）
         
-        IC = 因子值与未来收益率的Pearson相关系数
-        衡量因子对未来收益的线性预测能力
+        计算因子值与未来收益率之间的Pearson相关系数
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
+            df: 输入数据框
             factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
+            return_col: 收益率列名
+            group_col: 分组列名（可选，如按日期分组）
         
         Returns:
-            IC值（范围 -1 到 1）
-        
-        评价标准:
-            - |IC| > 0.03: 因子有一定预测能力
-            - |IC| > 0.05: 因子较优秀
-            - |IC| > 0.10: 因子非常优秀
+            IC值结果数据框
         
         Examples:
-            >>> ic = factor.ic(df, "momentum")
-            >>> print(f"IC值: {ic:.4f}")
+            >>> # 计算每日IC值
+            >>> ic_df = factor.ic(df, "factor_value", "next_return", "date")
         """
         ...
     
     def ir(
         self,
         df: pl.DataFrame,
-        factor_col: str,
-        return_col: str = "return",
-        period: int = 20
-    ) -> float:
+        ic_col: str
+    ) -> pl.DataFrame:
         """
-        IR值（信息比率）
+        IR值计算（信息比率）
         
-        IR = IC均值 / IC标准差
-        衡量因子收益的稳定性和持续性
+        计算IC的均值除以IC的标准差
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
-            factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
-            period: 滚动计算IC的窗口期（默认20）
+            df: 输入数据框（通常是IC序列）
+            ic_col: IC列名
         
         Returns:
-            IR值
+            IR值结果
         
-        评价标准:
-            - IR > 0.5: 因子较稳定
-            - IR > 1.0: 因子很稳定
-            - IR > 2.0: 因子非常优秀
+        Examples:
+            >>> # 先计算IC，再计算IR
+            >>> ic_df = factor.ic(df, "factor_value", "next_return", "date")
+            >>> ir_df = factor.ir(ic_df, "ic")
         """
         ...
     
@@ -4323,25 +4520,26 @@ class Factor:
         self,
         df: pl.DataFrame,
         factor_col: str,
-        return_col: str = "return"
-    ) -> float:
+        return_col: str,
+        group_col: Optional[str] = None
+    ) -> pl.DataFrame:
         """
-        Rank IC值（秩相关系数）
+        Rank IC计算（秩相关系数）
         
-        计算因子排名与收益排名的相关性，相比IC更稳健
+        计算因子值与未来收益率之间的Spearman秩相关系数
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
+            df: 输入数据框
             factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
+            return_col: 收益率列名
+            group_col: 分组列名（可选）
         
         Returns:
-            Rank IC值（范围 -1 到 1）
+            Rank IC值结果
         
-        评价标准:
-            - |Rank IC| > 0.03: 因子有一定预测能力
-            - |Rank IC| > 0.05: 因子较优秀
-            - |Rank IC| > 0.10: 因子非常优秀
+        Examples:
+            >>> # 计算每日Rank IC
+            >>> rank_ic_df = factor.rank_ic(df, "factor_value", "next_return", "date")
         """
         ...
     
@@ -4349,79 +4547,74 @@ class Factor:
         self,
         df: pl.DataFrame,
         factor_col: str,
-        return_col: str = "return",
+        return_col: str,
         n_quantiles: int = 5
     ) -> pl.DataFrame:
         """
         分层分析
         
-        按因子值分层，统计各层的平均收益
+        将因子值分成N层，计算各层的平均收益率
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
+            df: 输入数据框
             factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
+            return_col: 收益率列名
             n_quantiles: 分层数量（默认5）
         
         Returns:
-            包含quantile和mean_return列的DataFrame
+            各层统计结果
         
-        评价标准:
-            - 单调性：分层收益应呈现单调递增/递减
-            - 多空收益：最高层与最低层收益差
-            - 区分度：各层收益差异越大越好
+        Examples:
+            >>> # 5分层分析
+            >>> quantile_df = factor.quantile(df, "factor_value", "next_return", 5)
         """
         ...
     
     def coverage(
         self,
         df: pl.DataFrame,
-        factor_col: str
-    ) -> float:
+        factor_col: str,
+        group_col: Optional[str] = None
+    ) -> pl.DataFrame:
         """
-        因子覆盖率
+        因子覆盖度
         
-        计算非空因子值的比例
+        计算因子的非空值占比
         
         Args:
-            df: 包含因子数据的DataFrame
+            df: 输入数据框
             factor_col: 因子列名
+            group_col: 分组列名（可选）
         
         Returns:
-            覆盖率（0-1之间的比例）
+            覆盖度统计
         
-        评价标准:
-            - 覆盖率 > 0.8: 因子覆盖充分
-            - 覆盖率 > 0.9: 因子覆盖良好
+        Examples:
+            >>> # 计算每日因子覆盖度
+            >>> coverage_df = factor.coverage(df, "factor_value", "date")
         """
         ...
     
     def ic_win_rate(
         self,
         df: pl.DataFrame,
-        factor_col: str,
-        return_col: str = "return",
-        period: int = 20
-    ) -> float:
+        ic_col: str
+    ) -> pl.DataFrame:
         """
         IC胜率
         
-        IC胜率 = IC>0的次数 / 总次数
-        衡量因子预测方向的准确率
+        计算IC > 0的比例
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
-            factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
-            period: 滚动窗口（默认20）
+            df: 输入数据框（IC序列）
+            ic_col: IC列名
         
         Returns:
-            IC胜率（0-1之间的比例）
+            IC胜率统计
         
-        评价标准:
-            - IC胜率 > 0.5: 因子有预测能力
-            - IC胜率 > 0.6: 因子较强
-            - IC胜率 > 0.7: 因子很强
+        Examples:
+            >>> ic_df = factor.ic(df, "factor_value", "next_return", "date")
+            >>> win_rate_df = factor.ic_win_rate(ic_df, "ic")
         """
         ...
     
@@ -4429,23 +4622,28 @@ class Factor:
         self,
         df: pl.DataFrame,
         factor_col: str,
-        return_col: str = "return",
-        n_quantiles: int = 5
-    ) -> float:
+        return_col: str,
+        top_pct: float = 0.2,
+        bottom_pct: float = 0.2
+    ) -> pl.DataFrame:
         """
-        多空收益
+        多空收益率
         
-        多空收益 = 最高分位收益 - 最低分位收益
-        衡量因子的盈利能力
+        计算多头组合（高因子值）与空头组合（低因子值）的收益差
         
         Args:
-            df: 包含因子和收益率数据的DataFrame
+            df: 输入数据框
             factor_col: 因子列名
-            return_col: 未来收益率列名（默认"return"）
-            n_quantiles: 分层数量（默认5）
+            return_col: 收益率列名
+            top_pct: 多头比例（默认0.2，即前20%）
+            bottom_pct: 空头比例（默认0.2，即后20%）
         
         Returns:
-            多空收益（最高层收益 - 最低层收益）
+            多空收益统计
+        
+        Examples:
+            >>> # 计算多空收益（前20% vs 后20%）
+            >>> ls_df = factor.long_short(df, "factor_value", "next_return", 0.2, 0.2)
         """
         ...
     
@@ -4453,35 +4651,412 @@ class Factor:
         self,
         df: pl.DataFrame,
         factor_col: str,
-        date_col: str = "date",
-        group_col: str = "symbol",
-        n_quantiles: int = 5
-    ) -> float:
+        time_col: str,
+        id_col: str
+    ) -> pl.DataFrame:
         """
         因子换手率
         
-        换手率 = 相邻两期分层组合中股票变化的比例
-        衡量因子的稳定性，换手率越低表示因子越稳定
+        计算相邻两期因子排名的变化程度
         
         Args:
-            df: 包含因子数据的DataFrame（需要包含时间列和分组列）
+            df: 输入数据框（需包含时间列和标识列）
             factor_col: 因子列名
-            date_col: 时间列名（默认"date"）
-            group_col: 分组列名（如股票代码，默认"symbol"）
+            time_col: 时间列名
+            id_col: 标识列名（如股票代码）
+        
+        Returns:
+            换手率统计
+        
+        Examples:
+            >>> # 计算因子换手率
+            >>> turnover_df = factor.turnover(df, "factor_value", "date", "stock_code")
+        """
+        ...
+    
+    def clean(
+        self,
+        df: pl.DataFrame,
+        factor_cols: List[str],
+        method: Literal["orthogonalize", "neutralize"] = "orthogonalize"
+    ) -> pl.DataFrame:
+        """
+        多因子预处理（正交化或中性化）
+        
+        对多个因子进行正交化处理，消除因子间的线性相关性
+        或进行中性化处理（保留原始因子，添加残差列）
+        
+        Args:
+            df: 输入DataFrame
+            factor_cols: 因子列名列表（第一个为基准因子）
+            method: 处理方法
+                - "orthogonalize": 正交化，直接修改后续因子值
+                - "neutralize": 中性化，保留原始值并添加 {factor}_residual 列
+        
+        Returns:
+            处理后的DataFrame
+        
+        Examples:
+            >>> # 正交化处理
+            >>> df = factor.clean(
+            ...     df,
+            ...     factor_cols=["size", "value", "momentum"],
+            ...     method="orthogonalize"
+            ... )
+            >>> # 结果: size不变，value和momentum被正交化
+            >>> 
+            >>> # 中性化处理
+            >>> df = factor.clean(
+            ...     df,
+            ...     factor_cols=["size", "value", "momentum"],
+            ...     method="neutralize"
+            ... )
+            >>> # 结果: 原始列不变，新增 value_residual 和 momentum_residual
+        """
+        ...
+    
+    # ================================================================
+    # 单因子检验 (Single Factor Tests)
+    # ================================================================
+    
+    def ic_test(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: Optional[str] = None,
+        method: Literal["pearson", "spearman"] = "pearson"
+    ) -> pl.DataFrame:
+        """
+        IC检验
+        
+        计算因子与收益率的相关性（Information Coefficient）
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名（可选，若提供则按时间分组计算）
+            method: 相关性计算方法
+                - "pearson": Pearson相关系数（默认）
+                - "spearman": Spearman秩相关系数
+        
+        Returns:
+            IC统计结果（time, ic, t_stat, p_value）
+        
+        Examples:
+            >>> # 计算单期IC
+            >>> ic_result = factor.ic_test(df, "factor_value", "next_return")
+            >>> 
+            >>> # 计算时间序列IC
+            >>> ic_result = factor.ic_test(
+            ...     df, "factor_value", "next_return", 
+            ...     time_col="date", method="spearman"
+            ... )
+        """
+        ...
+    
+    def portfolio_sorts(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: Optional[str] = None,
+        n_quantiles: int = 5
+    ) -> pl.DataFrame:
+        """
+        投资组合排序法
+        
+        将样本按因子值分层，计算各层平均收益率
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名（可选）
             n_quantiles: 分层数量（默认5）
         
         Returns:
-            平均换手率（0-2之间，单边换手率）
+            分层收益统计（quantile, mean_return, std_return, sharpe）
         
-        评价标准:
-            - 换手率 < 0.3: 因子很稳定
-            - 换手率 < 0.5: 因子较稳定
-            - 换手率 > 0.7: 因子不稳定
-        
-        说明:
-            换手率的计算方法：
-            1. 对每个时间截面，按因子值将股票分为n_quantiles组
-            2. 对于相邻两期，计算每组中股票的变化比例
-            3. 换手率 = (新增股票数 + 减少股票数) / (2 × 组内股票总数)
+        Examples:
+            >>> # 5分位数排序
+            >>> sorts_result = factor.portfolio_sorts(
+            ...     df, "factor_value", "next_return", 
+            ...     time_col="date", n_quantiles=5
+            ... )
         """
         ...
+    
+    def factor_return(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: Optional[str] = None
+    ) -> pl.DataFrame:
+        """
+        因子收益率
+        
+        通过截面回归计算因子收益率序列
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名（可选）
+        
+        Returns:
+            因子收益统计（time, factor_return, t_stat, p_value）
+        
+        Examples:
+            >>> # 计算因子收益
+            >>> fr_result = factor.factor_return(
+            ...     df, "factor_value", "next_return", time_col="date"
+            ... )
+        """
+        ...
+    
+    def ic_decay(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: str,
+        id_col: str,
+        max_lag: int = 10,
+        method: Literal["pearson", "spearman"] = "pearson"
+    ) -> pl.DataFrame:
+        """
+        IC衰减分析
+        
+        计算因子与未来不同期收益率的IC，分析因子预测能力的持续性
+        
+        Args:
+            df: 输入DataFrame（需包含时间列和标识列）
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名
+            id_col: 标识列名（如股票代码）
+            max_lag: 最大滞后期数（默认10）
+            method: 相关性计算方法（"pearson" 或 "spearman"）
+        
+        Returns:
+            IC衰减统计（lag, ic, t_stat, p_value）
+        
+        Examples:
+            >>> # 分析10期IC衰减
+            >>> decay_result = factor.ic_decay(
+            ...     df, "factor_value", "next_return",
+            ...     time_col="date", id_col="stock_code",
+            ...     max_lag=10
+            ... )
+        """
+        ...
+    
+    # ================================================================
+    # 多因子回归分析 (Multi-Factor Regression)
+    # ================================================================
+    
+    def fama_macbeth(
+        self,
+        df: pl.DataFrame,
+        factor_cols: List[str],
+        return_col: str,
+        time_col: str
+    ) -> pl.DataFrame:
+        """
+        Fama-MacBeth回归
+        
+        两步回归法：先截面回归得因子收益，再时间序列回归检验显著性
+        
+        Args:
+            df: 输入DataFrame
+            factor_cols: 因子列名列表
+            return_col: 收益率列名
+            time_col: 时间列名
+        
+        Returns:
+            回归结果（factor, mean_coef, t_stat, p_value）
+        
+        Examples:
+            >>> # Fama-MacBeth回归
+            >>> fm_result = factor.fama_macbeth(
+            ...     df, 
+            ...     factor_cols=["size", "value", "momentum"],
+            ...     return_col="next_return",
+            ...     time_col="date"
+            ... )
+        """
+        ...
+    
+    def time_series_regression(
+        self,
+        df: pl.DataFrame,
+        factor_cols: List[str],
+        return_col: str,
+        id_col: str
+    ) -> pl.DataFrame:
+        """
+        时间序列回归
+        
+        对每只股票进行时间序列回归，分析因子对个股收益的解释能力
+        
+        Args:
+            df: 输入DataFrame
+            factor_cols: 因子列名列表
+            return_col: 收益率列名
+            id_col: 标识列名（如股票代码）
+        
+        Returns:
+            回归统计（id, factor, coefficient, t_stat, p_value, r_squared）
+        
+        Examples:
+            >>> # 时间序列回归
+            >>> ts_result = factor.time_series_regression(
+            ...     df,
+            ...     factor_cols=["size", "value", "momentum"],
+            ...     return_col="next_return",
+            ...     id_col="stock_code"
+            ... )
+        """
+        ...
+    
+    def factor_mimicking_portfolio(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: str,
+        top_pct: float = 0.3,
+        bottom_pct: float = 0.3
+    ) -> pl.DataFrame:
+        """
+        因子模拟组合
+        
+        构建多空组合（做多高因子值，做空低因子值）并计算组合收益
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名
+            top_pct: 多头比例（默认0.3）
+            bottom_pct: 空头比例（默认0.3）
+        
+        Returns:
+            组合收益序列（time, long_return, short_return, ls_return）
+        
+        Examples:
+            >>> # 构建因子模拟组合
+            >>> fmp_result = factor.factor_mimicking_portfolio(
+            ...     df, "factor_value", "next_return",
+            ...     time_col="date", top_pct=0.3, bottom_pct=0.3
+            ... )
+        """
+        ...
+    
+    # ================================================================
+    # 稳健性检验 (Robustness Tests)
+    # ================================================================
+    
+    def subsample_test(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: str,
+        n_splits: int = 3,
+        method: Literal["pearson", "spearman"] = "pearson"
+    ) -> pl.DataFrame:
+        """
+        子期检验
+        
+        将样本分成多个子期，检验因子在不同时期的稳定性
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名
+            n_splits: 子期数量（默认3）
+            method: 相关性计算方法（"pearson" 或 "spearman"）
+        
+        Returns:
+            子期统计（period, start_date, end_date, mean_ic, t_stat, p_value）
+        
+        Examples:
+            >>> # 3个子期稳定性检验
+            >>> subsample_result = factor.subsample_test(
+            ...     df, "factor_value", "next_return",
+            ...     time_col="date", n_splits=3
+            ... )
+        """
+        ...
+    
+    def subgroup_test(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        group_col: str,
+        method: Literal["pearson", "spearman"] = "pearson"
+    ) -> pl.DataFrame:
+        """
+        分组检验
+        
+        在不同子样本（如行业、市值）中检验因子有效性
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            group_col: 分组列名（如行业、市值分组）
+            method: 相关性计算方法（"pearson" 或 "spearman"）
+        
+        Returns:
+            分组统计（group, mean_ic, t_stat, p_value）
+        
+        Examples:
+            >>> # 按行业分组检验
+            >>> subgroup_result = factor.subgroup_test(
+            ...     df, "factor_value", "next_return",
+            ...     group_col="industry"
+            ... )
+        """
+        ...
+    
+    def rolling_ic(
+        self,
+        df: pl.DataFrame,
+        factor_col: str,
+        return_col: str,
+        time_col: str,
+        window: int = 60,
+        method: Literal["pearson", "spearman"] = "pearson"
+    ) -> pl.DataFrame:
+        """
+        滚动IC检验
+        
+        计算滚动窗口IC，分析因子表现的时变特征
+        
+        Args:
+            df: 输入DataFrame
+            factor_col: 因子列名
+            return_col: 收益率列名
+            time_col: 时间列名
+            window: 滚动窗口大小（默认60）
+            method: 相关性计算方法（"pearson" 或 "spearman"）
+        
+        Returns:
+            滚动IC序列（time, rolling_ic, rolling_ir）
+        
+        Examples:
+            >>> # 60期滚动IC
+            >>> rolling_result = factor.rolling_ic(
+            ...     df, "factor_value", "next_return",
+            ...     time_col="date", window=60
+            ... )
+        """
+        ...
+

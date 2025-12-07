@@ -14,6 +14,8 @@ fn polars_quant(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ====================================================================
     m.add_function(wrap_pyfunction!(data::returns, m)?)?;
     m.add_function(wrap_pyfunction!(data::load, m)?)?;
+    m.add_function(wrap_pyfunction!(data::linear, m)?)?;                // 线性回归
+    m.add_function(wrap_pyfunction!(data::clean, m)?)?;                 // 数据清洗
     
     // ====================================================================
     // 回测模块 (Backtesting)
