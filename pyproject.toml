@@ -6,7 +6,6 @@ authors = [
     { name = "Firstastor", email = "23150126@hdu.edu.cn" }
 ]
 version = "1.0.0"
-license = { file = "LICENSE" }
 requires-python = ">=3.10"
 
 dependencies = [
@@ -26,9 +25,5 @@ package = false
 
 [dependency-groups]
 dev = [
-    "baostock>=0.8.9",
-    "numpy>=2.2.6",
-    "pytest-benchmark>=5.2.3",
-    "pytest-memray>=1.8.0",
     "ta-lib>=0.6.8",
 ]

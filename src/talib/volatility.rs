@@ -1,63 +1,21 @@
-use crate::talib::overlap::calc_rma;
 use itertools::izip;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
+use serde::Deserialize;
+
+use crate::talib::overlap::calc_ema;
 
 // ====================================================================
 // Volatility Indicators - 波动率指标 (Alphabetical Order)
 // ====================================================================
 
-#[polars_expr(output_type=Float64)]
-pub fn atr(inputs: &[Series]) -> PolarsResult<Series> {
-    let high = inputs[0].cast(&DataType::Float64)?;
-    let low = inputs[1].cast(&DataType::Float64)?;
-    let close = inputs[2].cast(&DataType::Float64)?;
-
-    let high = high.f64()?;
-    let low = low.f64()?;
-    let close = close.f64()?;
-
-    let timeperiod = inputs[3].i64()?.get(0).unwrap_or(14) as usize;
-
-    let mut trange_filled: Vec<f64> = Vec::with_capacity(high.len());
-    let mut prev_close: Option<f64> = None;
-
-    for (h_opt, l_opt, c_opt) in izip!(high.into_iter(), low.into_iter(), close.into_iter()) {
-        if prev_close.is_none() {
-            let val = match (h_opt, l_opt) {
-                (Some(h), Some(l)) => Some(h - l),
-                _ => None,
-            };
-            trange_filled.push(val.unwrap_or(0.0));
-        } else {
-            let val = match (h_opt, l_opt, prev_close) {
-                (Some(h), Some(l), Some(pc)) => {
-                    Some((h - l).max((h - pc).abs()).max((l - pc).abs()))
-                }
-                _ => None,
-            };
-            trange_filled.push(val.unwrap_or(0.0));
-        }
-        prev_close = c_opt;
-    }
-
-    let rma_res = calc_rma(&trange_filled, timeperiod);
-
-    let n = rma_res.len();
-    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("atr".into(), n);
-    for v in rma_res {
-        if let Some(x) = v {
-            builder.append_value(x);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Ok(builder.finish().into_series())
+#[derive(Deserialize)]
+struct AtrKwargs {
+    timeperiod: Option<usize>,
 }
 
 #[polars_expr(output_type=Float64)]
-pub fn natr(inputs: &[Series]) -> PolarsResult<Series> {
+pub fn atr(inputs: &[Series], kwargs: AtrKwargs) -> PolarsResult<Series> {
     let high = inputs[0].cast(&DataType::Float64)?;
     let low = inputs[1].cast(&DataType::Float64)?;
     let close = inputs[2].cast(&DataType::Float64)?;
@@ -66,41 +24,27 @@ pub fn natr(inputs: &[Series]) -> PolarsResult<Series> {
     let low = low.f64()?;
     let close = close.f64()?;
 
-    let timeperiod = inputs[3].i64()?.get(0).unwrap_or(14) as usize;
+    let timeperiod = kwargs.timeperiod.unwrap_or(14);
 
-    let mut trange_filled: Vec<f64> = Vec::with_capacity(high.len());
-    let mut prev_close: Option<f64> = None;
+    let trange = calc_trange(high, low, close);
+    Ok(calc_ema(&trange, 2 * timeperiod - 1).into_series())
+}
 
-    for (h_opt, l_opt, c_opt) in izip!(high.into_iter(), low.into_iter(), close.into_iter()) {
-        if prev_close.is_none() {
-            let val = match (h_opt, l_opt) {
-                (Some(h), Some(l)) => Some(h - l),
-                _ => None,
-            };
-            trange_filled.push(val.unwrap_or(0.0));
-        } else {
-            let val = match (h_opt, l_opt, prev_close) {
-                (Some(h), Some(l), Some(pc)) => {
-                    Some((h - l).max((h - pc).abs()).max((l - pc).abs()))
-                }
-                _ => None,
-            };
-            trange_filled.push(val.unwrap_or(0.0));
-        }
-        prev_close = c_opt;
-    }
+#[polars_expr(output_type=Float64)]
+pub fn natr(inputs: &[Series], kwargs: AtrKwargs) -> PolarsResult<Series> {
+    let high = inputs[0].cast(&DataType::Float64)?;
+    let low = inputs[1].cast(&DataType::Float64)?;
+    let close = inputs[2].cast(&DataType::Float64)?;
 
-    let atr = calc_rma(&trange_filled, timeperiod);
+    let high = high.f64()?;
+    let low = low.f64()?;
+    let close = close.f64()?;
 
-    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("natr".into(), atr.len());
-    for (atr_opt, c_opt) in izip!(atr.into_iter(), close.into_iter()) {
-        match (atr_opt, c_opt) {
-            (Some(a), Some(c)) if c != 0.0 => builder.append_value((a / c) * 100.0),
-            _ => builder.append_null(),
-        }
-    }
+    let timeperiod = kwargs.timeperiod.unwrap_or(14);
 
-    Ok(builder.finish().into_series())
+    let trange = calc_trange(high, low, close);
+    let atr = calc_ema(&trange, 2 * timeperiod - 1);
+    Ok((&atr / close * 100).into_series())
 }
 
 #[polars_expr(output_type=Float64)]
@@ -113,33 +57,28 @@ pub fn trange(inputs: &[Series]) -> PolarsResult<Series> {
     let low = low.f64()?;
     let close = close.f64()?;
 
-    let n = high.len();
-    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("trange".into(), n);
-    let mut prev_close: Option<f64> = None;
+    Ok(calc_trange(high, low, close).into_series())
+}
 
-    for (h_opt, l_opt, c_opt) in izip!(high.into_iter(), low.into_iter(), close.into_iter()) {
-        let val = if prev_close.is_none() {
-            match (h_opt, l_opt) {
-                (Some(h), Some(l)) => Some(h - l),
-                _ => None,
-            }
-        } else {
-            match (h_opt, l_opt, prev_close) {
-                (Some(h), Some(l), Some(pc)) => {
-                    Some((h - l).max((h - pc).abs()).max((l - pc).abs()))
-                }
-                _ => None,
-            }
-        };
+// ====================================================================
+// Calculation Helpers
+// ====================================================================
 
-        if let Some(v) = val {
-            builder.append_value(v);
-        } else {
-            builder.append_null();
+fn calc_trange(
+    high: &Float64Chunked,
+    low: &Float64Chunked,
+    close: &Float64Chunked,
+) -> Float64Chunked {
+    let pre_close = close.shift(1 as i64);
+    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("trange".into(), high.len());
+
+    izip!(high, low, &pre_close).for_each(|(h, l, pc)| match (h, l, pc) {
+        (Some(h), Some(l), Some(pc)) => {
+            let tr = (h - l).max((h - pc).abs()).max((l - pc).abs());
+            builder.append_value(tr);
         }
+        _ => builder.append_null(),
+    });
 
-        prev_close = c_opt;
-    }
-
-    Ok(builder.finish().into_series())
+    builder.finish()
 }

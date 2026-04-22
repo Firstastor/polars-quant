@@ -1,5 +1,5 @@
 use itertools::izip;
-use polars::prelude::*;
+use polars::{chunked_array::collect, prelude::*};
 use pyo3_polars::{derive::polars_expr, export::polars_arrow::array::Array};
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -13,6 +13,12 @@ pub struct BbandsKwargs {
     pub timeperiod: usize,
     pub nbdevup: Option<f64>,
     pub nbdevdn: Option<f64>,
+}
+
+#[derive(Deserialize)]
+pub struct MaKwargs {
+    pub timeperiod: usize,
+    pub matype: Option<i64>,
 }
 
 fn bbands_output(_: &[Field]) -> PolarsResult<Field> {
@@ -74,7 +80,6 @@ pub fn bbands(inputs: &[Series], kwargs: BbandsKwargs) -> PolarsResult<Series> {
             sum_sq += value * value;
             window.push_back(value);
 
-
             if count < timeperiod {
                 upper_b.append_null();
                 middle_b.append_null();
@@ -105,38 +110,38 @@ pub fn bbands(inputs: &[Series], kwargs: BbandsKwargs) -> PolarsResult<Series> {
 }
 
 #[polars_expr(output_type=Float64)]
-pub fn dema(inputs: &[Series]) -> PolarsResult<Series> {
+pub fn dema(inputs: &[Series], kwargs: MaKwargs) -> PolarsResult<Series> {
     let real = inputs[0].cast(&DataType::Float64)?;
     let real = real.f64()?;
-    let timeperiod = inputs[1].i64()?.get(0).unwrap_or(30) as usize;
+    let timeperiod = kwargs.timeperiod;
 
     Ok(calc_dema(real, timeperiod))
 }
 
 #[polars_expr(output_type=Float64)]
-pub fn ema(inputs: &[Series]) -> PolarsResult<Series> {
+pub fn ema(inputs: &[Series], kwargs: MaKwargs) -> PolarsResult<Series> {
     let real = inputs[0].cast(&DataType::Float64)?;
     let real = real.f64()?;
-    let timeperiod = inputs[1].i64()?.get(0).unwrap_or(30) as usize;
+    let timeperiod = kwargs.timeperiod;
 
     Ok(calc_ema(real, timeperiod))
 }
 
 #[polars_expr(output_type=Float64)]
-pub fn kama(inputs: &[Series]) -> PolarsResult<Series> {
+pub fn kama(inputs: &[Series], kwargs: MaKwargs) -> PolarsResult<Series> {
     let real = inputs[0].cast(&DataType::Float64)?;
     let real = real.f64()?;
-    let timeperiod = inputs[1].i64()?.get(0).unwrap_or(30) as usize;
+    let timeperiod = kwargs.timeperiod;
 
     Ok(calc_kama(real, timeperiod))
 }
 
 #[polars_expr(output_type=Float64)]
-pub fn ma(inputs: &[Series]) -> PolarsResult<Series> {
+pub fn ma(inputs: &[Series], kwargs: MaKwargs) -> PolarsResult<Series> {
     let ca = inputs[0].cast(&DataType::Float64)?;
     let ca = ca.f64()?;
-    let timeperiod = inputs[1].i64()?.get(0).unwrap_or(30) as usize;
-    let matype = inputs[2].i64()?.get(0).unwrap_or(0);
+    let timeperiod = kwargs.timeperiod;
+    let matype = kwargs.matype;
 
     let mut buf: Vec<f64> = Vec::with_capacity(ca.len());
     for arr in ca.downcast_iter() {
@@ -390,30 +395,31 @@ pub fn wma(inputs: &[Series]) -> PolarsResult<Series> {
 // Calculation Helpers
 // ====================================================================
 
-pub fn calc_dema(value: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series {
+pub fn calc_dema(
+    value: &ChunkedArray<Float64Type>,
+    timeperiod: usize,
+) -> ChunkedArray<Float64Type> {
     let ema1 = calc_ema(value, timeperiod);
-    let ema2 = calc_ema(ema1.f64().unwrap(), timeperiod);
-    let ema1 = ema1.f64().unwrap();
-    let ema2 = ema2.f64().unwrap();
+    let ema2 = calc_ema(&ema1, timeperiod);
 
     let n = ema1.len();
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("dema".into(), n);
 
-    for (ema1_value, ema2_value) in izip!(ema1, ema2) {
+    for (ema1_value, ema2_value) in izip!(ema1.downcast_iter(), ema2.downcast_iter()) {
         match (ema1_value, ema2_value) {
             (Some(e1), Some(e2)) => builder.append_value(2.0 * e1 - e2),
             _ => builder.append_null(),
         }
     }
 
-    builder.finish().into_series()
+    builder.finish()
 }
 
-pub fn calc_ema(value: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series {
+pub fn calc_ema(values: &ChunkedArray<Float64Type>, timeperiod: usize) -> ChunkedArray<Float64Type> {
     let n = value.len();
 
     if timeperiod == 0 || n < timeperiod {
-        return Float64Chunked::full_null("ema".into(), n).into_series();
+        return Float64Chunked::full_null("ema".into(), n);
     }
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("ema".into(), n);
@@ -446,14 +452,76 @@ pub fn calc_ema(value: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series 
         }
     });
 
-    builder.finish().into_series()
+    builder.finish()
 }
 
-pub fn calc_sma(values: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series {
+pub fn calc_kama(
+    values: &ChunkedArray<Float64Type>,
+    timeperiod: usize,
+) -> ChunkedArray<Float64Type> {
+    let n = values.len();
+
+    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("er".into(), n);
+
+    let values = values.rechunk().into_owned();
+    let er_denominator_diff = values.shift(1) - values;
+    let er_numerator_diff = values.shift(timeperiod as i64) - values;
+    let mut kama_value = values.get(timeperiod).unwrap();
+    let mut sum = 0.0f64;
+
+    izip!(
+        er_numerator_diff.downcast_iter(),
+        er_denominator_diff.downcast_iter()
+    )
+    .for_each(|(numerator_diff_array, denominator_diff_array)| {
+        for i in 0..numerator_diff_array.len() {
+            if denominator_diff_array.is_null(i) {
+                continue;
+            }
+
+            sum += denominator_diff_array.value(i).abs();
+
+            if numerator_diff_array.is_null(i) {
+                builder.append_null();
+                continue;
+            }
+
+            builder.append_value(numerator_diff_array.value(i - timeperiod).abs() / sum);
+        }
+    });
+    
+    let er = builder.finish();
+    
+    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("kama".into(), n);
+    let fast_sc = 2.0 / 3.0;
+    let slow_sc = 2.0 / 31.0;
+    
+    er.downcast_iter().for_each(|er_array| {
+        for i in 0..er_array.len() {
+            if er_array.is_null(i) {
+                builder.append_null();
+                continue;
+            }
+            let er_value = er_array.value(i);
+            let sc = (er_value * (fast_sc - slow_sc) + slow_sc).powi(2);
+            if i == 0 {
+                kama_value = values.value(i);
+            } else {
+                kama_value = sc.mul_add(values.value(i) - kama_value, kama_value);
+            }
+            builder.append_value(kama_value);
+        }
+    });
+}
+
+pub fn calc_sma(
+    values: &ChunkedArray<Float64Type>,
+    timeperiod: usize,
+) -> ChunkedArray<Float64Type> {
     let n = values.len();
 
     if timeperiod == 0 || n < timeperiod {
-        return Float64Chunked::full_null("sma".into(), n).into_series();
+        return Float64Chunked::full_null("sma".into(), n);
     }
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("sma".into(), n);
@@ -490,14 +558,17 @@ pub fn calc_sma(values: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series
         }
     });
 
-    builder.finish().into_series()
+    builder.finish()
 }
 
-pub fn calc_wma(values: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series {
+pub fn calc_wma(
+    values: &ChunkedArray<Float64Type>,
+    timeperiod: usize,
+) -> ChunkedArray<Float64Type> {
     let n = values.len();
 
     if timeperiod == 0 || n < timeperiod {
-        return Float64Chunked::full_null("sma".into(), n).into_series();
+        return Float64Chunked::full_null("sma".into(), n);
     }
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("sma".into(), n);
@@ -535,5 +606,5 @@ pub fn calc_wma(values: &ChunkedArray<Float64Type>, timeperiod: usize) -> Series
         }
     });
 
-    builder.finish().into_series()
+    builder.finish()
 }
