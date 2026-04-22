@@ -9,14 +9,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 itertools = "0.14"
-polars = { version = "0.53", default-features = false}
+polars = { version = "0.53", default-features = false, features = ["dtype-struct"] }
 pyo3 = { version = "0.27", features = ["abi3-py310", "extension-module"] }
-pyo3-polars = "0.26"
-rayon = "1"
+pyo3-polars = { version = "0.26", features = ["derive"] }
+serde = { version = "1", features = ["serde_derive"] }
 
 [profile.release]
 codegen-units = 1
 lto = "fat"
 panic = "abort"
-strip = true
+strip = "debuginfo"
 

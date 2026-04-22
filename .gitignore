@@ -71,3 +71,4 @@ docs/_build/
 
 *.parquet
 Data/
+.benchmarks

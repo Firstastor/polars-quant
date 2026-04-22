@@ -1,108 +1,132 @@
+# ruff: noqa
 import polars as pl
+from polars.plugins import register_plugin_function
+from pathlib import Path
 
-# ====================================================================
-# Overlap Studies - 重叠指标
-# ====================================================================
+_LIB = Path(__file__).parent.parent / "polars_quant.abi3.so"
 
 
 def BBANDS(
-    real: pl.Series, timeperiod: int = 20, nbdevup: float = 2.0, nbdevdn: float = 2.0
-) -> tuple[pl.Series, pl.Series, pl.Series]:
+    real: pl.Expr, timeperiod: int = 20, nbdevup: float = 2.0, nbdevdn: float = 2.0
+) -> tuple[pl.Expr, pl.Expr, pl.Expr]:
     """BBANDS - Bollinger Bands (Upper, Middle, Lower)"""
-    middleband = real.rolling_mean(timeperiod)
-    stdev = real.rolling_std(timeperiod)
+    expr = register_plugin_function(
+        args=[real, timeperiod, nbdevup, nbdevdn],
+        plugin_path=_LIB,
+        function_name="bbands",
+        is_elementwise=False,
+    )
     return (
-        (middleband + stdev * nbdevup).rename("bb_upper"),
-        middleband.rename("bb_middle"),
-        (middleband - stdev * nbdevdn).rename("bb_lower"),
+        expr.struct.field("bb_upper"),
+        expr.struct.field("bb_middle"),
+        expr.struct.field("bb_lower"),
     )
 
 
-def DEMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def DEMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """DEMA - Double Exponential Moving Average"""
-    ema1 = real.ewm_mean(span=timeperiod, adjust=False)
-    return (ema1 * 2.0 - ema1.ewm_mean(span=timeperiod, adjust=False)).rename("dema")
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="dema",
+        is_elementwise=False,
+    )
 
 
-def EMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def EMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """EMA - Exponential Moving Average"""
-    return real.ewm_mean(span=timeperiod, adjust=False).rename("ema")
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="ema",
+        is_elementwise=False,
+    )
 
 
-def KAMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def KAMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """KAMA - Kaufman Adaptive Moving Average"""
-    sc = (
-        (real.diff(timeperiod).abs() / real.diff().abs().rolling_sum(timeperiod))
-        * 0.6022
-        + 0.0645
-    ).pow(2)
-    ln_decay = (1 - sc).log1p()
-    cum_ln_decay = ln_decay.cum_sum()
-    cum_prod_decay = cum_ln_decay.exp()
-    return (real * sc / cum_prod_decay).cum_sum() * cum_prod_decay
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="kama",
+        is_elementwise=False,
+    )
 
 
-def MA(real: pl.Series, timeperiod: int = 30, matype: int = 0) -> pl.Series:
+def MA(real: pl.Expr, timeperiod: int = 30, matype: int = 0) -> pl.Expr:
     """MA - Moving Average"""
-    if matype == 0:
-        return SMA(real, timeperiod)
-    if matype == 1:
-        return EMA(real, timeperiod)
-    if matype == 2:
-        return WMA(real, timeperiod)
-    if matype == 3:
-        return DEMA(real, timeperiod)
-    if matype == 4:
-        return TEMA(real, timeperiod)
-    if matype == 5:
-        return TRIMA(real, timeperiod)
-    if matype == 6:
-        return KAMA(real, timeperiod)
-    if matype == 7:
-        return MAMA(real, timeperiod)
-    if matype == 8:
-        return T3(real, timeperiod)
-    return SMA(real, timeperiod)
+    return register_plugin_function(
+        args=[real, timeperiod, matype],
+        plugin_path=_LIB,
+        function_name="ma",
+        is_elementwise=False,
+    )
 
 
 def MAMA(
-    real: pl.Series, fastlimit: float = 0.0, slowlimit: float = 0.0
-) -> tuple[pl.Series, pl.Series]:
+    real: pl.Expr, fastlimit: float = 0.0, slowlimit: float = 0.0
+) -> tuple[pl.Expr, pl.Expr]:
     """MAMA - MESA Adaptive Moving Average"""
-    smooth = (4 * real.shift(3) + 3 * real.shift(2) + 2 * real.shift(1) + real) / 10
-    return pl.Series(), pl.Series()
+    expr = register_plugin_function(
+        args=[real, fastlimit, slowlimit],
+        plugin_path=_LIB,
+        function_name="mama",
+        is_elementwise=False,
+    )
+    return (expr.struct.field("mama"), expr.struct.field("fama"))
 
 
 def MAVP(
-    real: pl.Series,
-    periods: pl.Series,
+    real: pl.Expr,
+    periods: pl.Expr,
     minperiod: int = 2,
     maxperiod: int = 30,
     matype: int = 0,
-) -> pl.Series:
+) -> pl.Expr:
     """MAVP - Moving Average with Variable Period"""
-    return pl.Series()
+    return register_plugin_function(
+        args=[real, periods, minperiod, maxperiod, matype],
+        plugin_path=_LIB,
+        function_name="mavp",
+        is_elementwise=False,
+    )
 
-def MIDPOINT(real: pl.Series, timeperiod: int = 14) -> pl.Series:
+
+def MIDPOINT(real: pl.Expr, timeperiod: int = 14) -> pl.Expr:
     """MIDPOINT - Midpoint over period"""
-    return (real.rolling_max(timeperiod) + real.rolling_min(timeperiod)) * 0.5
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="midpoint",
+        is_elementwise=False,
+    )
 
 
-def MIDPRICE(high: pl.Series, low: pl.Series, timeperiod: int = 14) -> pl.Series:
+def MIDPRICE(high: pl.Expr, low: pl.Expr, timeperiod: int = 14) -> pl.Expr:
     """MIDPRICE - Midpoint Price over period"""
-    return (high.rolling_max(timeperiod) + low.rolling_min(timeperiod)) * 0.5
+    return register_plugin_function(
+        args=[high, low, timeperiod],
+        plugin_path=_LIB,
+        function_name="midprice",
+        is_elementwise=False,
+    )
 
 
 def SAR(
-    high: pl.Series, low: pl.Series, acceleration: float = 0.0, maximum: float = 0.0
-) -> pl.Series:
+    high: pl.Expr, low: pl.Expr, acceleration: float = 0.0, maximum: float = 0.0
+) -> pl.Expr:
     """SAR - Parabolic SAR"""
-    return pl.Series()
+    return register_plugin_function(
+        args=[high, low, acceleration, maximum],
+        plugin_path=_LIB,
+        function_name="sar",
+        is_elementwise=False,
+    )
 
 
 def SAREXT(
-    high: pl.Series,
-    low: pl.Series,
+    high: pl.Expr,
+    low: pl.Expr,
     startvalue: float = 0.0,
     offsetonreverse: float = 0.0,
     accelerationinitlong: float = 0.0,
@@ -111,51 +135,72 @@ def SAREXT(
     accelerationinitshort: float = 0.0,
     accelerationshort: float = 0.0,
     accelerationmaxshort: float = 0.0,
-) -> pl.Series:
+) -> pl.Expr:
     """SAREXT - Parabolic SAR - Extended"""
-    return pl.Series()
+    return register_plugin_function(
+        args=[
+            high,
+            low,
+            startvalue,
+            offsetonreverse,
+            accelerationinitlong,
+            accelerationlong,
+            accelerationmaxlong,
+            accelerationinitshort,
+            accelerationshort,
+            accelerationmaxshort,
+        ],
+        plugin_path=_LIB,
+        function_name="sarext",
+        is_elementwise=False,
+    )
 
 
-def SMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def SMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """SMA - Simple Moving Average"""
-    return real.rolling_mean(timeperiod)
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="sma",
+        is_elementwise=False,
+    )
 
 
-def T3(real: pl.Series, timeperiod: int = 5, vfactor: float = 0.7) -> pl.Series:
+def T3(real: pl.Expr, timeperiod: int = 5, vfactor: float = 0.7) -> pl.Expr:
     """T3 - Triple Exponential Moving Average (T3)"""
-    vfactor2 = vfactor**2
-    vfactor3 = vfactor**3
-    c1 = -(vfactor3)
-    c2 = 3.0 * vfactor3 + 3.0 * vfactor3
-    c3 = -6.0 * vfactor2 - 3.0 * vfactor - 3.0 * vfactor3
-    c4 = 1.0 + 3.0 * vfactor + vfactor3 + 3.0 * vfactor2
-    e1 = real.ewm_mean(span=timeperiod, adjust=False)
-    e2 = e1.ewm_mean(span=timeperiod, adjust=False)
-    e3 = e2.ewm_mean(span=timeperiod, adjust=False)
-    e4 = e3.ewm_mean(span=timeperiod, adjust=False)
-    e5 = e4.ewm_mean(span=timeperiod, adjust=False)
-    e6 = e5.ewm_mean(span=timeperiod, adjust=False)
-    return e6 * c1 + e5 * c2 + e4 * c3 + e3 * c4
+    return register_plugin_function(
+        args=[real, timeperiod, vfactor],
+        plugin_path=_LIB,
+        function_name="t3",
+        is_elementwise=False,
+    )
 
 
-def TEMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def TEMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """TEMA - Triple Exponential Moving Average"""
-    e1 = real.ewm_mean(span=timeperiod, adjust=False)
-    e2 = e1.ewm_mean(span=timeperiod, adjust=False)
-    e3 = e2.ewm_mean(span=timeperiod, adjust=False)
-    return e1 * 3.0 - e2 * 3.0 + e3
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="tema",
+        is_elementwise=False,
+    )
 
 
-def TRIMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def TRIMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """TRIMA - Triangular Moving Average"""
-    n1 = (timeperiod + 1) // 2
-    n2 = (timeperiod // 2) + 1 if timeperiod % 2 == 0 else n1
-    return real.rolling_mean(n1).rolling_mean(n2)
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="trima",
+        is_elementwise=False,
+    )
 
 
-def WMA(real: pl.Series, timeperiod: int = 30) -> pl.Series:
+def WMA(real: pl.Expr, timeperiod: int = 30) -> pl.Expr:
     """WMA - Weighted Moving Average"""
-    weights = [
-        i / (timeperiod * (timeperiod + 1) / 2) for i in range(1, timeperiod + 1)
-    ]
-    return real.rolling_mean(window_size=timeperiod, weights=weights)
+    return register_plugin_function(
+        args=[real, timeperiod],
+        plugin_path=_LIB,
+        function_name="wma",
+        is_elementwise=False,
+    )
