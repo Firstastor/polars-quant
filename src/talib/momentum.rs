@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-use crate::talib::overlap::{calc_ema, calc_rma, calc_sma};
+use crate::talib::overlap::{calc_ema, calc_sma};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 

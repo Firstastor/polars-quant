@@ -8,6 +8,7 @@ name = "polars_quant"
 crate-type = ["cdylib"]
 
 [dependencies]
+arrayvec = "0.7"
 itertools = "0.14"
 polars = { version = "0.53", default-features = false, features = ["dtype-struct"] }
 pyo3 = { version = "0.27", features = ["abi3-py310", "extension-module"] }

@@ -98,11 +98,11 @@ pub fn obv(inputs: &[Series]) -> PolarsResult<Series> {
 // ====================================================================
 
 fn calc_ad(
-    high: &ChunkedArray<Float64Type>,
-    low: &ChunkedArray<Float64Type>,
-    close: &ChunkedArray<Float64Type>,
-    volume: &ChunkedArray<Float64Type>,
-) -> ChunkedArray<Float64Type> {
+    high: &Float64Chunked,
+    low: &Float64Chunked,
+    close: &Float64Chunked,
+    volume: &Float64Chunked,
+) -> Float64Chunked {
     let n = high.len();
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("ad".into(), n);
