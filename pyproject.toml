@@ -9,8 +9,8 @@ version = "1.0.0"
 requires-python = ">=3.10"
 
 dependencies = [
-    "polars>=1.42",
-    "pyarrow>=24",
+    "polars>=1.44",
+    "pyarrow>=25",
 ]
 
 [build-system]
@@ -22,4 +22,3 @@ python-source = "python"
 
 [tool.uv]
 package = false
-

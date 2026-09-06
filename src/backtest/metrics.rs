@@ -14,6 +14,7 @@ pub fn calculate_summary(
     let mut summary_metrics = HashMap::new();
     let total_trading_days = equity_curve.len();
 
+    
     if total_trading_days == 0 {
         return summary_metrics;
     }

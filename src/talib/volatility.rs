@@ -35,7 +35,7 @@ pub fn natr(inputs: &[Series], kwargs: AtrKwargs) -> PolarsResult<Series> {
 
     let timeperiod = kwargs.timeperiod.unwrap_or(14);
 
-    Ok((&calc_atr(high, low, close, timeperiod) / close * 100).into_series())
+    Ok(calc_natr(high, low, close, timeperiod).into_series())
 }
 
 #[polars_expr(output_type=Float64)]
@@ -51,7 +51,7 @@ pub fn trange(inputs: &[Series]) -> PolarsResult<Series> {
     Ok(calc_trange(high, low, close).into_series())
 }
 
-pub fn calc_atr(
+pub(crate) fn calc_atr(
     high: &Float64Chunked,
     low: &Float64Chunked,
     close: &Float64Chunked,
@@ -61,7 +61,7 @@ pub fn calc_atr(
     if n < timeperiod
         || low.len() != n
         || close.len() != n
-        || high.null_count() + low.null_count() + close.null_count() > 0
+        || high.null_count() + low.null_count() + close.null_count() != 0
     {
         return Float64Chunked::full_null("atr".into(), n);
     }
@@ -73,55 +73,40 @@ pub fn calc_atr(
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("atr".into(), high.len());
 
     let alpha = 1.0 / timeperiod as f64;
+    let mut atr = 0.;
+    let mut sum: f64 = 0.;
+
     let mut value_iter = izip!(
         high.no_null_iter(),
         low.no_null_iter(),
         close.no_null_iter()
     );
 
-    let (_, _, mut c_pre_val) = value_iter.next().unwrap();
-    let mut sum_ad: f64 = 0.;
+    let (_, _, mut c_pre) = value_iter.next().unwrap();
     builder.append_null();
 
-    for (h_val, l_val, c_val) in value_iter.by_ref().take(timeperiod - 1) {
-        if c_pre_val > h_val {
-            sum_ad += c_pre_val - l_val;
-        } else if c_pre_val < l_val {
-            sum_ad += h_val - c_pre_val;
+    for (i, (h, l, c)) in value_iter.enumerate() {
+        let tr = if c_pre > h {
+            c_pre - l
+        } else if c_pre < l {
+            h - c_pre
         } else {
-            sum_ad += h_val - l_val;
+            h - l
+        };
+
+        if i < timeperiod - 1 {
+            sum += tr;
+            builder.append_null();
+        } else if i == timeperiod - 1 {
+            sum += tr;
+            atr = sum / timeperiod as f64;
+            builder.append_value(atr);
+        } else {
+            atr += (tr - atr) * alpha;
+            builder.append_value(atr);
         }
-        c_pre_val = c_val;
-        
-        builder.append_null();
-    }
 
-    let (h_val, l_val, c_val) = value_iter.next().unwrap();
-    if c_pre_val > h_val {
-        sum_ad += c_pre_val - l_val;
-    } else if c_pre_val < l_val {
-        sum_ad += h_val - c_pre_val;
-    } else {
-        sum_ad += h_val - l_val;
-    }
-    c_pre_val = c_val;
-    sum_ad = sum_ad / timeperiod as f64;
-    builder.append_value(sum_ad);
-
-    for (h_val, l_val, c_val) in value_iter {
-        sum_ad = alpha.mul_add(
-            if c_pre_val > h_val {
-                c_pre_val - l_val
-            } else if c_pre_val < l_val {
-                h_val - c_pre_val
-            } else {
-                h_val - l_val
-            } - sum_ad,
-            sum_ad,
-        );
-        c_pre_val = c_val;
-
-        builder.append_value(sum_ad);
+        c_pre = c;
     }
 
     builder.finish()
@@ -135,7 +120,7 @@ pub fn calc_trange(
     let n = high.len();
     if low.len() != n
         || close.len() != n
-        || high.null_count() + low.null_count() + close.null_count() > 0
+        || high.null_count() + low.null_count() + close.null_count() != 0
     {
         return Float64Chunked::full_null("trange".into(), n);
     }
@@ -152,18 +137,40 @@ pub fn calc_trange(
         close.no_null_iter()
     );
 
-    let (_, _, mut c_pre_val) = value_iter.next().unwrap();
+    let (_, _, mut c_pre) = value_iter.next().unwrap();
     builder.append_null();
 
-    for (h_val, l_val, c_val) in value_iter {
-        if c_pre_val > h_val {
-            builder.append_value(c_pre_val - l_val);
-        } else if c_pre_val < l_val {
-            builder.append_value(h_val - c_pre_val);
+    for (h, l, c) in value_iter {
+        if c_pre > h {
+            builder.append_value(c_pre - l);
+        } else if c_pre < l {
+            builder.append_value(h - c_pre);
         } else {
-            builder.append_value(h_val - l_val);
+            builder.append_value(h - l);
         }
-        c_pre_val = c_val;
+        c_pre = c;
+    }
+
+    builder.finish()
+}
+
+pub fn calc_natr(
+    high: &Float64Chunked,
+    low: &Float64Chunked,
+    close: &Float64Chunked,
+    timeperiod: usize,
+) -> Float64Chunked {
+    let n = close.len();
+    let atr = calc_atr(high, low, close, timeperiod);
+    let close = close.rechunk();
+
+    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("natr".into(), n);
+
+    for (a, c) in atr.iter().zip(close.iter()) {
+        match (a, c) {
+            (Some(a), Some(c)) => builder.append_value(a / c * 100.0),
+            _ => builder.append_null(),
+        }
     }
 
     builder.finish()

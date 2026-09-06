@@ -2,36 +2,36 @@
 
 ## Momentum
 
-- [ ] adx
-- [ ] adxr
+- [x] adx
+- [x] adxr
 - [ ] apo
 - [ ] aroon
 - [ ] aroonosc
 - [ ] bop
 - [ ] cci
 - [ ] cmo
-- [ ] dx
+- [x] dx
 - [ ] macd
 - [ ] macdext
 - [ ] macdfix
-- [ ] mfi
-- [ ] minus_di
-- [ ] minus_dm
-- [ ] mom
-- [ ] plus_di
-- [ ] plus_dm
+- [x] mfi
+- [x] minus_di
+- [x] minus_dm
+- [x] mom
+- [x] plus_di
+- [x] plus_dm
 - [ ] ppo
 - [ ] roc
 - [ ] rocp
 - [ ] rocr
 - [ ] rocr100
-- [ ] rsi
+- [x] rsi
 - [ ] stoch
 - [ ] stochf
 - [ ] stochrsi
 - [ ] trix
 - [ ] ultosc
-- [ ] willr
+- [x] willr
 
 ## Overlap
 
@@ -47,8 +47,8 @@
 - [ ] sar
 - [ ] sarext
 - [x] sma
-- [ ] t3
-- [ ] tema
+- [x] t3
+- [x] tema
 - [x] trima
 - [x] wma
 

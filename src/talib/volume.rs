@@ -62,16 +62,16 @@ pub fn obv(inputs: &[Series]) -> PolarsResult<Series> {
 
     let mut value_iter = izip!(close.no_null_iter(), volume.no_null_iter());
 
-    let (mut c_pre_val, mut sum) = value_iter.next().unwrap();
+    let (mut c_pre, mut sum) = value_iter.next().unwrap();
     builder.append_value(sum);
 
-    for (c_val, v_val) in value_iter {
-        if c_val > c_pre_val {
-            sum += v_val;
-        } else if c_val < c_pre_val {
-            sum -= v_val;
+    for (c, v) in value_iter {
+        if c > c_pre {
+            sum += v;
+        } else if c < c_pre {
+            sum -= v;
         }
-        c_pre_val = c_val;
+        c_pre = c;
 
         builder.append_value(sum);
     }
@@ -101,20 +101,16 @@ fn calc_ad(
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("ad".into(), n);
 
-    let mut sum: f64 = 0.;
+    let mut ad: f64 = 0.;
 
-    let mut value_iter = izip!(
+    for (h, l, c, v) in izip!(
         high.no_null_iter(),
         low.no_null_iter(),
         close.no_null_iter(),
         volume.no_null_iter()
-    );
-
-    let (h_val, l_val, c_val, v_val) = value_iter.next().unwrap();
-    builder.append_value(calc_mfv(&mut sum, h_val, l_val, c_val, v_val));
-
-    for (h_val, l_val, c_val, v_val) in value_iter {
-        builder.append_value(calc_mfv(&mut sum, h_val, l_val, c_val, v_val));
+    ) {
+        ad += calc_mfv(h, l, c, v);
+        builder.append_value(ad);
     }
 
     builder.finish()
@@ -142,9 +138,6 @@ fn calc_adosc(
         return Float64Chunked::full_null("adosc".into(), n);
     }
 
-    let fast_alpha = 2.0 / (fastperiod as f64 + 1.0);
-    let slow_alpha = 2.0 / (slowperiod as f64 + 1.0);
-
     let high = high.rechunk();
     let low = low.rechunk();
     let close = close.rechunk();
@@ -152,48 +145,45 @@ fn calc_adosc(
 
     let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("adosc".into(), n);
 
-    let mut ad = 0.0f64;
+    let fast_alpha = 2.0 / (fastperiod as f64 + 1.0);
+    let slow_alpha = 2.0 / (slowperiod as f64 + 1.0);
+    let mut ad = 0.;
+    let mut count = 0;
+    let mut ema1 = 0.;
+    let mut ema2 = 0.;
 
-    let mut value_iter = izip!(
+    for (h, l, c, v) in izip!(
         high.no_null_iter(),
         low.no_null_iter(),
         close.no_null_iter(),
         volume.no_null_iter()
-    );
+    ) {
+        count += 1;
 
-    let (h_val, l_val, c_val, v_val) = value_iter.next().unwrap();
-    calc_mfv(&mut ad, h_val, l_val, c_val, v_val);
-    let mut fast_ema: f64 = ad;
-    let mut slow_ema: f64 = ad;
-    builder.append_null();
-    
-    for (high, low, close, volume) in value_iter.by_ref().take(slowperiod - 2) {
-        calc_mfv(&mut ad, high, low, close, volume);
-        fast_ema = fast_alpha.mul_add(ad - fast_ema, fast_ema);
-        slow_ema = slow_alpha.mul_add(ad - slow_ema, slow_ema);
-        builder.append_null();
-    }
-
-    let (h_val, l_val, c_val, v_val) = value_iter.next().unwrap();
-    calc_mfv(&mut ad, h_val, l_val, c_val, v_val);
-    fast_ema = fast_alpha.mul_add(ad - fast_ema, fast_ema);
-    slow_ema = slow_alpha.mul_add(ad - slow_ema, slow_ema);
-    builder.append_value(fast_ema - slow_ema);
-
-    for (high, low, close, volume) in value_iter {
-        calc_mfv(&mut ad, high, low, close, volume);
-        fast_ema = fast_alpha.mul_add(ad - fast_ema, fast_ema);
-        slow_ema = slow_alpha.mul_add(ad - slow_ema, slow_ema);
-        builder.append_value(fast_ema - slow_ema);
+        ad += calc_mfv(h, l, c, v);
+        
+        if count == 1 {
+            ema1 = ad;
+            ema2 = ad;
+            builder.append_null();
+        } else if count < slowperiod {
+            ema1 += fast_alpha * (ad - ema1);
+            ema2 += slow_alpha * (ad - ema2);
+            builder.append_null();
+        } else {
+            ema1 += fast_alpha * (ad - ema1);
+            ema2 += slow_alpha * (ad - ema2);
+            builder.append_value(ema1 -ema2);
+        }
     }
 
     builder.finish()
 }
 
 #[inline(always)]
-fn calc_mfv(mfv: &mut f64, high: f64, low: f64, close: f64, volume: f64) -> f64 {
+fn calc_mfv(high: f64, low: f64, close: f64, volume: f64) -> f64 {
     if high != low {
-        *mfv += (close.mul_add(2.0, -high - low)) / (high - low) * volume;
+        return close.mul_add(2.0, -high - low) / (high - low) * volume;
     }
-    *mfv
+    0.
 }
