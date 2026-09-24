@@ -1583,7 +1583,6 @@ dependencies = [
 name = "polars_quant"
 version = "1.0.0"
 dependencies = [
- "arrayvec",
  "itertools",
  "polars",
  "pyo3",

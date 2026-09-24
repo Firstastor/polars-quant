@@ -1,7 +1,7 @@
-# ruff: noqa
+from pathlib import Path
+
 import polars as pl
 from polars.plugins import register_plugin_function
-from pathlib import Path
 
 _LIB = str(Path(__file__).parent.parent)
 

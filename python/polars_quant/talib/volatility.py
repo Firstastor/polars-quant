@@ -1,6 +1,6 @@
-# ruff: noqa
-import polars as pl
 from pathlib import Path
+
+import polars as pl
 from polars.plugins import register_plugin_function
 
 _LIB = str(Path(__file__).parent.parent)
@@ -29,13 +29,7 @@ def NATR(
     timeperiod: int = 14,
 ) -> pl.Expr:
     """NATR - Normalized Average True Range"""
-    return register_plugin_function(
-        args=[high, low, close],
-        kwargs={"timeperiod": timeperiod},
-        plugin_path=_LIB,
-        function_name="natr",
-        is_elementwise=False,
-    )
+    return ATR(high, low, close, timeperiod) / close * 100.0
 
 
 def TRANGE(high: pl.Expr, low: pl.Expr, close: pl.Expr) -> pl.Expr:

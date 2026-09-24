@@ -1,4 +1,3 @@
-use arrayvec::ArrayVec;
 use itertools::izip;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -478,95 +477,50 @@ pub fn calc_ema(values: &Float64Chunked, timeperiod: usize) -> Float64Chunked {
 pub fn calc_kama(values: &Float64Chunked, timeperiod: usize) -> Float64Chunked {
     let n = values.len();
 
-    if timeperiod == 0 || n < timeperiod + 1 {
+    if timeperiod == 0 || n < timeperiod + 1 || values.null_count() != 0 {
         return Float64Chunked::full_null("kama".into(), n);
     }
-
-    if values.null_count() != 0 {
-        return Float64Chunked::full_null("kama".into(), n);
-    }
-
     let values = values.rechunk();
+    let v = values.cont_slice().unwrap();
 
-    let mut er_builder = PrimitiveChunkedBuilder::<Float64Type>::new("er".into(), n);
-    let mut adj_diffs: AllocRingBuffer<f64> = AllocRingBuffer::new(timeperiod);
-    let mut count: usize = 0;
-    let mut prev: Option<f64> = None;
-    let mut volatility = 0.0f64;
-    let mut window: AllocRingBuffer<f64> = AllocRingBuffer::new(timeperiod + 1);
-
-    for val in values.no_null_iter() {
-        count += 1;
-        let adj = match prev {
-            Some(p) => (val - p).abs(),
-            None => 0.0,
-        };
-        prev = Some(val);
-        volatility += adj;
-
-        if adj_diffs.is_full() {
-            if let Some(old_diff) = adj_diffs.dequeue() {
-                volatility -= old_diff;
+    let mut diff_ring = vec![0.0f64; timeperiod];
+    let mut ring_idx = 0usize;
+    let mut vol = 0.0f64;
+    let mut er = Vec::with_capacity(n - timeperiod);
+    for i in 0..n {
+        if i > 0 {
+            let d = (v[i] - v[i - 1]).abs();
+            vol += d - diff_ring[ring_idx];
+            diff_ring[ring_idx] = d;
+            ring_idx += 1;
+            if ring_idx == timeperiod {
+                ring_idx = 0;
             }
         }
-        adj_diffs.enqueue(adj);
-
-        if window.is_full() {
-            window.dequeue();
-        }
-        window.enqueue(val);
-
-        if count < timeperiod + 1 {
-            er_builder.append_null();
-        } else {
-            let direction = (val - *window.front().unwrap()).abs();
-            if volatility == 0.0 {
-                er_builder.append_value(0.0);
+        if i >= timeperiod {
+            let direction = (v[i] - v[i - timeperiod]).abs();
+            if vol == 0.0 {
+                er.push(0.0);
             } else {
-                er_builder.append_value(direction / volatility);
+                er.push(direction / vol);
             }
         }
     }
-
-    let er = er_builder.finish();
 
     let fast_sc = 2.0 / 3.0;
     let slow_sc = 2.0 / 31.0;
-    let sc_sqrt = &er * (fast_sc - slow_sc) + slow_sc;
-    let sc = &sc_sqrt * &sc_sqrt;
-
-    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("kama".into(), n);
-    let mut kama_val = 0.0f64;
-    let mut initialized = false;
-
-    // Build a contiguous slice of values for random access in phase 2
-    let vals = values.cont_slice().unwrap_or(&[]);
-    let vals_len = vals.len();
-
-    let mut i: usize = 0;
-
-    for sc_opt in sc.iter() {
-        let Some(sc_val) = sc_opt else {
-            builder.append_null();
-            i += 1;
-            continue;
-        };
-        if i >= vals_len {
-            builder.append_null();
-            i += 1;
-            continue;
-        }
-        let val = vals[i];
-        if !initialized {
-            initialized = true;
-            kama_val = vals[i - 1];
-        }
-        kama_val = sc_val.mul_add(val - kama_val, kama_val);
-        builder.append_value(kama_val);
-        i += 1;
+    let mut kama = Vec::with_capacity(n - timeperiod);
+    let mut kama_val = v[timeperiod - 1];
+    for (e, &val) in er.iter().zip(v[timeperiod..].iter()) {
+        let sc = (e * (fast_sc - slow_sc) + slow_sc).powi(2);
+        kama_val = sc.mul_add(val - kama_val, kama_val);
+        kama.push(kama_val);
     }
-
-    builder.finish()
+    let mut out_ch = Float64Chunked::full_null("kama".into(), timeperiod);
+    out_ch
+        .append(&Float64Chunked::from_vec("kama".into(), kama))
+        .expect("append");
+    out_ch
 }
 
 pub fn calc_ma(values: &Float64Chunked, timeperiod: usize, matype: usize) -> Float64Chunked {
@@ -577,8 +531,8 @@ pub fn calc_ma(values: &Float64Chunked, timeperiod: usize, matype: usize) -> Flo
         4 => calc_tema(values, timeperiod),
         5 => calc_trima(values, timeperiod),
         6 => calc_kama(values, timeperiod),
-        7 => calc_sma(values, timeperiod), // MAMA tempoally drop
-        8 => calc_t3(values, timeperiod, 0.0),
+        7 => calc_sma(values, timeperiod),
+        8 => calc_t3(values, timeperiod, 0.7),
         _ => calc_sma(values, timeperiod),
     }
 }
@@ -618,9 +572,9 @@ pub fn calc_mavp(
         if period > maxp {
             period = maxp;
         }
-        let period = period as usize;
+        let period = (period.max(1)) as usize;
 
-        if period == 0 || count < period {
+        if count < maxperiod.max(1) {
             builder.append_null();
             buf_idx = (buf_idx + 1) % buf_len;
             continue;
@@ -1038,14 +992,12 @@ pub(crate) fn calc_sma(values: &Float64Chunked, timeperiod: usize) -> Float64Chu
 
 pub fn calc_t3(values: &Float64Chunked, timeperiod: usize, vfactor: f64) -> Float64Chunked {
     let n = values.len();
-
-    if timeperiod == 0 || n < 6 * timeperiod - 5 || values.null_count() != 0 {
+    let head = 6 * timeperiod - 6;
+    if timeperiod == 0 || n < head + 1 || values.null_count() != 0 {
         return Float64Chunked::full_null("t3".into(), n);
     }
-
     let values = values.rechunk();
-
-    let mut builder = PrimitiveChunkedBuilder::<Float64Type>::new("t3".into(), n);
+    let v = values.cont_slice().unwrap();
 
     let alpha = 2.0 / (timeperiod as f64 + 1.0);
     let inverse_period = 1.0 / timeperiod as f64;
@@ -1053,119 +1005,108 @@ pub fn calc_t3(values: &Float64Chunked, timeperiod: usize, vfactor: f64) -> Floa
     let c2 = 3.0 * vfactor.powi(2) - 3.0 * c1;
     let c3 = -2.0 * c2 - 3.0 * c1 - 3.0 * vfactor;
     let c4 = 1.0 - c1 - c2 - c3;
-    let mut count: usize = 0;
-    let mut ema = ArrayVec::from([0.0f64; 6]);
-    let mut sum = ArrayVec::from([0.0f64; 6]);
+    let mut ema = [0.0f64; 6];
+    let mut sum = [0.0f64; 6];
 
-    for val in values.no_null_iter() {
+    let mut count = 0usize;
+    for &x in &v[..head] {
         count += 1;
         match count {
-            n if n < timeperiod => {
-                sum[0] += val;
-                builder.append_null();
-            }
-            n if n == timeperiod => {
-                sum[0] += val;
-                ema[0] = sum[0] / timeperiod as f64;
+            c if c < timeperiod => sum[0] += x,
+            c if c == timeperiod => {
+                sum[0] += x;
+                ema[0] = sum[0] * inverse_period;
                 sum[1] = ema[0];
-                builder.append_null();
             }
-            n if n < 2 * timeperiod - 1 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c < 2 * timeperiod - 1 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 sum[1] += ema[0];
-                builder.append_null();
             }
-            n if n == 2 * timeperiod - 1 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c == 2 * timeperiod - 1 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 sum[1] += ema[0];
                 ema[1] = sum[1] * inverse_period;
                 sum[2] = ema[1];
-                builder.append_null();
             }
-            n if n < 3 * timeperiod - 2 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c < 3 * timeperiod - 2 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 sum[2] += ema[1];
-                builder.append_null();
             }
-            n if n == 3 * timeperiod - 2 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c == 3 * timeperiod - 2 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 sum[2] += ema[1];
                 ema[2] = sum[2] * inverse_period;
                 sum[3] = ema[2];
-                builder.append_null();
             }
-            n if n < 4 * timeperiod - 3 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c < 4 * timeperiod - 3 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
                 sum[3] += ema[2];
-                builder.append_null();
             }
-            n if n == 4 * timeperiod - 3 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c == 4 * timeperiod - 3 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
                 sum[3] += ema[2];
                 ema[3] = sum[3] * inverse_period;
                 sum[4] = ema[3];
-                builder.append_null();
             }
-            n if n < 5 * timeperiod - 4 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c < 5 * timeperiod - 4 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
                 ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
                 sum[4] += ema[3];
-                builder.append_null();
             }
-            n if n == 5 * timeperiod - 4 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+            c if c == 5 * timeperiod - 4 => {
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
                 ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
                 sum[4] += ema[3];
                 ema[4] = sum[4] * inverse_period;
                 sum[5] = ema[4];
-                builder.append_null();
-            }
-            n if n < 6 * timeperiod - 5 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
-                ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
-                ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
-                ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
-                ema[4] = alpha.mul_add(ema[3] - ema[4], ema[4]);
-                sum[5] += ema[4];
-                builder.append_null();
-            }
-            n if n == 6 * timeperiod - 5 => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
-                ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
-                ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
-                ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
-                ema[4] = alpha.mul_add(ema[3] - ema[4], ema[4]);
-                sum[5] += ema[4];
-                ema[5] = sum[5] * inverse_period;
-                builder.append_value(
-                    c1.mul_add(ema[5], c2.mul_add(ema[4], c3.mul_add(ema[3], c4 * ema[2]))),
-                );
             }
             _ => {
-                ema[0] = alpha.mul_add(val - ema[0], ema[0]);
+                ema[0] = alpha.mul_add(x - ema[0], ema[0]);
                 ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
                 ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
                 ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
                 ema[4] = alpha.mul_add(ema[3] - ema[4], ema[4]);
-                ema[5] = alpha.mul_add(ema[4] - ema[5], ema[5]);
-                builder.append_value(
-                    c1.mul_add(ema[5], c2.mul_add(ema[4], c3.mul_add(ema[3], c4 * ema[2]))),
-                );
+                sum[5] += ema[4];
             }
         }
     }
 
-    builder.finish()
+    let mut out = Vec::with_capacity(n - head);
+    for &x in &v[head..] {
+        count += 1;
+        if count == 6 * timeperiod - 5 {
+            ema[0] = alpha.mul_add(x - ema[0], ema[0]);
+            ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
+            ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
+            ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
+            ema[4] = alpha.mul_add(ema[3] - ema[4], ema[4]);
+            sum[5] += ema[4];
+            ema[5] = sum[5] * inverse_period;
+        } else {
+            ema[0] = alpha.mul_add(x - ema[0], ema[0]);
+            ema[1] = alpha.mul_add(ema[0] - ema[1], ema[1]);
+            ema[2] = alpha.mul_add(ema[1] - ema[2], ema[2]);
+            ema[3] = alpha.mul_add(ema[2] - ema[3], ema[3]);
+            ema[4] = alpha.mul_add(ema[3] - ema[4], ema[4]);
+            ema[5] = alpha.mul_add(ema[4] - ema[5], ema[5]);
+        }
+        out.push(c1.mul_add(ema[5], c2.mul_add(ema[4], c3.mul_add(ema[3], c4 * ema[2]))));
+    }
+    let mut out_ch = Float64Chunked::full_null("t3".into(), head);
+    out_ch
+        .append(&Float64Chunked::from_vec("t3".into(), out))
+        .expect("append");
+    out_ch
 }
 
 pub fn calc_tema(values: &Float64Chunked, timeperiod: usize) -> Float64Chunked {

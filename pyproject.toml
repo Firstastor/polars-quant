@@ -2,16 +2,11 @@
 name = "polars-quant"
 description = "Blazingly Fast Polars Quant Tool"
 readme = "README.md"
-authors = [
-    { name = "Firstastor", email = "23150126@hdu.edu.cn" }
-]
+authors = [{ name = "Firstastor", email = "23150126@hdu.edu.cn" }]
 version = "1.0.0"
 requires-python = ">=3.10"
 
-dependencies = [
-    "polars>=1.44",
-    "pyarrow>=25",
-]
+dependencies = ["polars>=1.44.2"]
 
 [build-system]
 requires = ["maturin>=1.12,<2.0"]

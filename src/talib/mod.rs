@@ -1,6 +1,5 @@
 pub mod momentum;
 pub mod overlap;
-pub mod price;
 pub mod volatility;
 pub mod volume;
 
